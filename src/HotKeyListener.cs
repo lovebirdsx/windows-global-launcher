@@ -7,7 +7,7 @@ namespace CommandLauncher
     /// <summary>
     /// 这个类内部创建了一个“消息窗口”（HwndSource），
     /// 立刻用它的 HWND 去调用 RegisterHotKey，
-    /// 负责接收 WM_HOTKEY，一旦按下 Ctrl+Space，就触发 HotKeyPressed 事件。
+    /// 负责接收 WM_HOTKEY，一旦按下配置的热键，就触发 HotKeyPressed 事件。
     /// </summary>
     public class HotKeyListener : IDisposable
     {
