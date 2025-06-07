@@ -578,25 +578,52 @@ namespace CommandLauncher
                 return new ProcessStartInfo("cmd.exe");
             }
 
-            // 如果是简单的可执行文件路径（不包含空格或参数）
-            if (!shell.Contains(' ') || (shell.StartsWith("\"") && shell.EndsWith("\"") && shell.Count(c => c == '"') == 2))
+            shell = shell.Trim();
+
+            // 如果只有可执行文件路径（可能带引号但无参数）
+            if (!shell.Contains(' ') ||
+                (shell.StartsWith("\"") && shell.EndsWith("\"") && shell.Count(c => c == '"') == 2))
             {
                 return new ProcessStartInfo(shell.Trim('"'));
             }
 
-            // 处理复杂命令，如 powershell -Command "..."
-            var parts = shell.Split(' ', 2);
-            if (parts.Length >= 2)
+            string fileName;
+            string arguments = string.Empty;
+
+            if (shell.StartsWith("\""))
             {
-                return new ProcessStartInfo
+                // 路径被引号包裹，查找下一个引号作为路径结束
+                var end = shell.IndexOf('"', 1);
+                if (end == -1)
                 {
-                    FileName = parts[0],
-                    Arguments = parts[1]
-                };
+                    // 引号不完整，直接作为文件名处理
+                    fileName = shell.Trim('"');
+                }
+                else
+                {
+                    fileName = shell.Substring(1, end - 1);
+                    arguments = shell[(end + 1)..].Trim();
+                }
+            }
+            else
+            {
+                var index = shell.IndexOf(' ');
+                if (index == -1)
+                {
+                    fileName = shell;
+                }
+                else
+                {
+                    fileName = shell[..index];
+                    arguments = shell[(index + 1)..].Trim();
+                }
             }
 
-            // 默认情况
-            return new ProcessStartInfo(shell);
+            return new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = arguments
+            };
         }
 
         private void HideWindow()
