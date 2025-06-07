@@ -12,4 +12,4 @@ if (-Not (Test-Path -Path $publishDir)) {
 }
 
 # 拷贝exe到发布目录
-Copy-Item -Path "bin\Release\net8.0-windows\win-x64\publish\WindowsGlobalLauncher.exe" -Destination $publishDir
+Copy-Item -Path "src\WindowsGlobalLauncher\bin\Release\net8.0-windows\win-x64\publish\WindowsGlobalLauncher.exe" -Destination $publishDir
