@@ -4,6 +4,8 @@
 
 ## 开发
 
+项目源码位于 `src/WindowsGlobalLauncher` 目录，解决方案文件为 `WindowsGlobalLauncher.sln`。
+
 * 发布: `.\scripts\publish.ps1`
 
 ## 运行
