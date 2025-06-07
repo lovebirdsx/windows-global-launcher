@@ -48,8 +48,16 @@ namespace CommandLauncher
         {
             if (File.Exists(AppStateFilePath))
             {
-                var json = File.ReadAllText(AppStateFilePath);
-                _state = JsonSerializer.Deserialize<State>(json) ?? new State();
+                try
+                {
+                    var json = File.ReadAllText(AppStateFilePath);
+                    _state = JsonSerializer.Deserialize<State>(json) ?? new State();
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError("读取应用状态失败", ex);
+                    // 保持 _state 为默认值
+                }
             }
         }
 
