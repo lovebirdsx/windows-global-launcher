@@ -5,10 +5,10 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "C#: windows-global-launcher Debug",
+            "name": "C#: WindowsGlobalLauncher Debug",
             "type": "dotnet",
             "request": "launch",
-            "projectPath": "${workspaceFolder}/windows-global-launcher.csproj"
+            "projectPath": "${workspaceFolder}/src/WindowsGlobalLauncher/WindowsGlobalLauncher.csproj"
         }
 
     ]
