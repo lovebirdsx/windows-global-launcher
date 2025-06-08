@@ -439,7 +439,7 @@ namespace CommandLauncher
             _placeholder.Visibility = string.IsNullOrEmpty(_searchBox.Text) ? Visibility.Visible : Visibility.Hidden;
 
             RefreshCommandList();
-            SelectLastExecutedCommand();
+            ScrollCommandListToTop();
         }
 
         private void CenterWindowOnCurrentScreen()
@@ -553,6 +553,16 @@ namespace CommandLauncher
                 var lastExecuted = _filteredCommands.OrderByDescending(c => c.LastExecuted).First();
                 _selectedIndex = _filteredCommands.IndexOf(lastExecuted);
                 _commandList.SelectedIndex = _selectedIndex;
+            }
+        }
+
+        private void ScrollCommandListToTop()
+        {
+            if (_commandList.Items.Count > 0)
+            {
+                _selectedIndex = 0;
+                _commandList.SelectedIndex = _selectedIndex;
+                _commandList.ScrollIntoView(_commandList.Items[0]);
             }
         }
 
