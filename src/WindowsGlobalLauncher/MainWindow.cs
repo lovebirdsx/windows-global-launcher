@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 
@@ -198,8 +199,16 @@ namespace CommandLauncher
             descTextBlock.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromArgb(255, 160, 160, 160)));
             descTextBlock.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
 
+            var hotKeyTextBlock = new FrameworkElementFactory(typeof(TextBlock));
+            hotKeyTextBlock.SetValue(NameProperty, "HotKeyText");
+            hotKeyTextBlock.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding("HotKey"));
+            hotKeyTextBlock.SetValue(TextBlock.FontSizeProperty, 10.0);
+            hotKeyTextBlock.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromArgb(255, 160, 160, 160)));
+            hotKeyTextBlock.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
+
             leftStack.AppendChild(nameTextBlock);
             leftStack.AppendChild(descTextBlock);
+            leftStack.AppendChild(hotKeyTextBlock);
             gridFactory.AppendChild(leftStack);
 
             // 右侧Shell命令
@@ -219,6 +228,15 @@ namespace CommandLauncher
             gridFactory.AppendChild(shellTextBlock);
 
             dataTemplate.VisualTree = gridFactory;
+
+            var hideTrigger = new DataTrigger
+            {
+                Binding = new System.Windows.Data.Binding("HotKey"),
+                Value = ""
+            };
+            hideTrigger.Setters.Add(new Setter(VisibilityProperty, Visibility.Collapsed, "HotKeyText"));
+            dataTemplate.Triggers.Add(hideTrigger);
+
             _commandList.ItemTemplate = dataTemplate;
             ScrollViewer.SetVerticalScrollBarVisibility(_commandList, ScrollBarVisibility.Hidden);
 
@@ -328,6 +346,7 @@ namespace CommandLauncher
             _hotKeyListener.HotKeyPressed += ShowWindow;
         }
 
+
         private void ShowWindow()
         {
             Show();
@@ -383,6 +402,7 @@ namespace CommandLauncher
                 Name = configCmd.Name,
                 Description = configCmd.Description,
                 Shell = configCmd.Shell,
+                HotKey = configCmd.HotKey,
                 LastExecuted = AppState.Instance.GetCommandLastExecutedTime(configCmd.Name),
             }).ToList();
 
@@ -504,6 +524,45 @@ namespace CommandLauncher
                     e.Handled = true;
                 }
             }
+
+            if (!e.Handled)
+            {
+                foreach (var cmd in AppConfig.Instance.Config.Commands)
+                {
+                    if (IsHotKeyMatch(cmd.HotKey, e))
+                    {
+                        ExecuteCommand(new Command
+                        {
+                            Name = cmd.Name,
+                            Description = cmd.Description,
+                            Shell = cmd.Shell,
+                            HotKey = cmd.HotKey
+                        });
+                        e.Handled = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        private static bool IsHotKeyMatch(string hotKey, KeyEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(hotKey))
+                return false;
+
+            try
+            {
+                if (new KeyGestureConverter().ConvertFromString(hotKey) is KeyGesture gesture)
+                {
+                    Key actualKey = e.Key == Key.System ? e.SystemKey : e.Key;
+                    return actualKey == gesture.Key && e.KeyboardDevice.Modifiers == gesture.Modifiers;
+                }
+            }
+            catch
+            {
+                // ignore parse errors
+            }
+            return false;
         }
 
         private void MoveSelection(int direction)
@@ -518,56 +577,60 @@ namespace CommandLauncher
             _commandList.ScrollIntoView(_commandList.SelectedItem);
         }
 
+        private void ExecuteCommand(Command selectedCommand)
+        {
+            if (selectedCommand.Name == "config")
+            {
+                AppConfig.OpenConfigFile();
+                HideWindow();
+                return;
+            }
+            else if (selectedCommand.Name == "setconfig")
+            {
+                AppConfig.SetConfigFile();
+                HideWindow();
+                return;
+            }
+            else if (selectedCommand.Name == "logs")
+            {
+                Logger.OpenLogFile();
+                HideWindow();
+                return;
+            }
+            else if (selectedCommand.Name == "exit")
+            {
+                AppState.Instance.SetCommandLastExecutedTime(selectedCommand.Name, DateTime.Now);
+                ExitApplication();
+                return;
+            }
+
+            try
+            {
+                Logger.LogInfo($"执行命令: {selectedCommand.Name} ({selectedCommand.Shell})");
+
+                var processInfo = ParseShellCommand(selectedCommand.Shell);
+                processInfo.UseShellExecute = true;
+                processInfo.CreateNoWindow = false;
+                processInfo.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+                Process.Start(processInfo);
+
+                AppState.Instance.SetCommandLastExecutedTime(selectedCommand.Name, DateTime.Now);
+
+                HideWindow();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"执行命令失败: {selectedCommand.Name}", ex);
+                MessageBox.Show($"执行命令失败: {ex.Message}");
+            }
+        }
+
         private void ExecuteSelectedCommand()
         {
             if (_commandList.SelectedItem is Command selectedCommand)
             {
-                if (selectedCommand.Name == "config")
-                {
-                    AppConfig.OpenConfigFile();
-                    HideWindow();
-                    return;
-                }
-                else if (selectedCommand.Name == "setconfig")
-                {
-                    AppConfig.SetConfigFile();
-                    HideWindow();
-                    return;
-                }
-                else if (selectedCommand.Name == "logs")
-                {
-                    Logger.OpenLogFile();
-                    HideWindow();
-                    return;
-                }
-                else if (selectedCommand.Name == "exit")
-                {
-                    AppState.Instance.SetCommandLastExecutedTime(selectedCommand.Name, DateTime.Now);
-                    ExitApplication();
-                    return;
-                }
-
-                try
-                {
-                    Logger.LogInfo($"执行命令: {selectedCommand.Name} ({selectedCommand.Shell})");
-
-
-                    var processInfo = ParseShellCommand(selectedCommand.Shell);
-                    processInfo.UseShellExecute = true;
-                    processInfo.CreateNoWindow = false;
-                    processInfo.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-
-                    Process.Start(processInfo);
-
-                    AppState.Instance.SetCommandLastExecutedTime(selectedCommand.Name, DateTime.Now);
-
-                    HideWindow();
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogError($"执行命令失败: {selectedCommand.Name}", ex);
-                    MessageBox.Show($"执行命令失败: {ex.Message}");
-                }
+                ExecuteCommand(selectedCommand);
             }
         }
 
