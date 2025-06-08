@@ -90,6 +90,8 @@ namespace CommandLauncher
     // 主窗口
     public class MainWindow : Window, IDisposable
     {
+        private static readonly string[] AppCommands = ["config", "setconfig", "logs", "exit"];
+
         private readonly ObservableCollection<Command> _filteredCommands = [];
         private readonly HotKeyListener _hotKeyListener = new();
         private readonly System.Windows.Forms.NotifyIcon _notifyIcon = new() { Text = "Command Launcher", Visible = true };
@@ -428,10 +430,10 @@ namespace CommandLauncher
 
         private void ShowWindow()
         {
+            CenterWindowOnCurrentScreen();
             Show();
             WindowState = WindowState.Normal;
 
-            CenterWindowOnCurrentScreen();
             Activate();
 
             _searchBox.Focus();
@@ -668,46 +670,59 @@ namespace CommandLauncher
             _commandList.ScrollIntoView(_commandList.SelectedItem);
         }
 
+        private bool ExecuteAppCommand(Command selectedCommand)
+        {
+            if (AppCommands.Contains(selectedCommand.Name))
+            {
+                if (selectedCommand.Name == "config")
+                {
+                    AppConfig.OpenConfigFile();
+                }
+                else if (selectedCommand.Name == "setconfig")
+                {
+                    AppConfig.SetConfigFile();
+                }
+                else if (selectedCommand.Name == "logs")
+                {
+                    Logger.OpenLogFile();
+                }
+                else if (selectedCommand.Name == "exit")
+                {
+                    ExitApplication();
+                }
+                return true;
+            }
+
+            return false;
+        }
+
+        private void ExecuteCommandImpl(Command selectedCommand)
+        {
+            if (ExecuteAppCommand(selectedCommand))
+            {
+                return;
+            }
+
+            Logger.LogInfo($"执行命令: {selectedCommand.Name} ({selectedCommand.Shell})");
+
+            var processInfo = ParseShellCommand(selectedCommand.Shell);
+            processInfo.UseShellExecute = true;
+            processInfo.CreateNoWindow = false;
+            processInfo.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+            Process.Start(processInfo);
+
+            AppState.Instance.SetCommandLastExecutedTime(selectedCommand.Name, DateTime.Now);
+
+            HideWindow();
+        }
+
         private void ExecuteCommand(Command selectedCommand)
         {
-            if (selectedCommand.Name == "config")
-            {
-                AppConfig.OpenConfigFile();
-                HideWindow();
-                return;
-            }
-            else if (selectedCommand.Name == "setconfig")
-            {
-                AppConfig.SetConfigFile();
-                HideWindow();
-                return;
-            }
-            else if (selectedCommand.Name == "logs")
-            {
-                Logger.OpenLogFile();
-                HideWindow();
-                return;
-            }
-            else if (selectedCommand.Name == "exit")
-            {
-                AppState.Instance.SetCommandLastExecutedTime(selectedCommand.Name, DateTime.Now);
-                ExitApplication();
-                return;
-            }
-
             try
             {
-                Logger.LogInfo($"执行命令: {selectedCommand.Name} ({selectedCommand.Shell})");
-
-                var processInfo = ParseShellCommand(selectedCommand.Shell);
-                processInfo.UseShellExecute = true;
-                processInfo.CreateNoWindow = false;
-                processInfo.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-
-                Process.Start(processInfo);
-
+                ExecuteCommandImpl(selectedCommand);
                 AppState.Instance.SetCommandLastExecutedTime(selectedCommand.Name, DateTime.Now);
-
                 HideWindow();
             }
             catch (Exception ex)
