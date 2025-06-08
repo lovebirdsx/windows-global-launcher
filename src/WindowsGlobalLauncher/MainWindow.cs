@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Windows;
@@ -12,6 +13,80 @@ using System.Windows.Media;
 
 namespace CommandLauncher
 {
+    // HotKey可见性转换器
+    public class HotKeyVisibilityConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (value is string hotKey && !string.IsNullOrEmpty(hotKey))
+            {
+                return Visibility.Visible;
+            }
+            return Visibility.Collapsed;
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            throw new NotImplementedException();
+        }
+    }
+
+    // 命令名称与快捷键组合转换器
+    public class CommandNameWithHotKeyConverter : IMultiValueConverter
+    {
+        public object Convert(object[] values, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (values.Length >= 2 && values[0] is string name && values[1] is string hotKey)
+            {
+                if (string.IsNullOrEmpty(hotKey))
+                    return name;
+
+                string macStyleHotKey = ConvertToMacStyle(hotKey);
+                return $"{name} ({macStyleHotKey})";
+            }
+            return values[0]?.ToString() ?? "";
+        }
+
+        public object[] ConvertBack(object value, Type[] targetTypes, object parameter, CultureInfo culture)
+        {
+            throw new NotImplementedException();
+        }
+
+        private static string ConvertToMacStyle(string hotKey)
+        {
+            if (string.IsNullOrEmpty(hotKey))
+                return "";
+
+            var parts = hotKey.Split('+');
+            var result = "";
+
+            foreach (var part in parts)
+            {
+                var trimmedPart = part.Trim().ToLower();
+                switch (trimmedPart)
+                {
+                    case "ctrl":
+                        result += "⌃";
+                        break;
+                    case "alt":
+                        result += "⌥";
+                        break;
+                    case "shift":
+                        result += "⇧";
+                        break;
+                    case "win":
+                        result += "⌘";
+                        break;
+                    default:
+                        result += trimmedPart.ToUpper();
+                        break;
+                }
+            }
+
+            return result;
+        }
+    }
+
     // 主窗口
     public class MainWindow : Window, IDisposable
     {
@@ -183,9 +258,15 @@ namespace CommandLauncher
             leftStack.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
             leftStack.SetValue(MarginProperty, new Thickness(0, 0, 10, 0));
 
-            // 名称
+            // 名称(包含快捷键)
             var nameTextBlock = new FrameworkElementFactory(typeof(TextBlock));
-            nameTextBlock.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding("Name"));
+            var nameBinding = new MultiBinding
+            {
+                Converter = new CommandNameWithHotKeyConverter()
+            };
+            nameBinding.Bindings.Add(new Binding("Name"));
+            nameBinding.Bindings.Add(new Binding("HotKey"));
+            nameTextBlock.SetBinding(TextBlock.TextProperty, nameBinding);
             nameTextBlock.SetValue(TextBlock.FontSizeProperty, 14.0);
             nameTextBlock.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
             nameTextBlock.SetValue(TextBlock.ForegroundProperty, Brushes.White);
@@ -194,27 +275,19 @@ namespace CommandLauncher
 
             // 描述
             var descTextBlock = new FrameworkElementFactory(typeof(TextBlock));
-            descTextBlock.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding("Description"));
+            descTextBlock.SetBinding(TextBlock.TextProperty, new Binding("Description"));
             descTextBlock.SetValue(TextBlock.FontSizeProperty, 11.0);
             descTextBlock.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromArgb(255, 160, 160, 160)));
             descTextBlock.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
 
-            var hotKeyTextBlock = new FrameworkElementFactory(typeof(TextBlock));
-            hotKeyTextBlock.SetValue(NameProperty, "HotKeyText");
-            hotKeyTextBlock.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding("HotKey"));
-            hotKeyTextBlock.SetValue(TextBlock.FontSizeProperty, 10.0);
-            hotKeyTextBlock.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromArgb(255, 160, 160, 160)));
-            hotKeyTextBlock.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
-
             leftStack.AppendChild(nameTextBlock);
             leftStack.AppendChild(descTextBlock);
-            leftStack.AppendChild(hotKeyTextBlock);
             gridFactory.AppendChild(leftStack);
 
             // 右侧Shell命令
             var shellTextBlock = new FrameworkElementFactory(typeof(TextBlock));
             shellTextBlock.SetValue(Grid.ColumnProperty, 1);
-            shellTextBlock.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding("Shell"));
+            shellTextBlock.SetBinding(TextBlock.TextProperty, new Binding("Shell"));
             shellTextBlock.SetValue(TextBlock.FontSizeProperty, 10.0);
             shellTextBlock.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromArgb(255, 120, 120, 120)));
             shellTextBlock.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
@@ -228,15 +301,6 @@ namespace CommandLauncher
             gridFactory.AppendChild(shellTextBlock);
 
             dataTemplate.VisualTree = gridFactory;
-
-            var hideTrigger = new DataTrigger
-            {
-                Binding = new System.Windows.Data.Binding("HotKey"),
-                Value = ""
-            };
-            hideTrigger.Setters.Add(new Setter(VisibilityProperty, Visibility.Collapsed, "HotKeyText"));
-            dataTemplate.Triggers.Add(hideTrigger);
-
             _commandList.ItemTemplate = dataTemplate;
             ScrollViewer.SetVerticalScrollBarVisibility(_commandList, ScrollBarVisibility.Hidden);
 
@@ -244,14 +308,6 @@ namespace CommandLauncher
             mainGrid.Children.Add(_commandList);
 
             Content = mainGrid;
-        }
-
-        private void SetupUI()
-        {
-            _commandList.ItemsSource = _filteredCommands;
-            _commandList.MouseDoubleClick += (s, e) => ExecuteSelectedCommand();
-
-            RefreshCommandList();
         }
 
         private void SetupNotifyIcon()
@@ -316,6 +372,14 @@ namespace CommandLauncher
                     System.Drawing.Brushes.DarkBlue, 4, 2);
             }
             return System.Drawing.Icon.FromHandle(bitmap.GetHicon());
+        }
+
+        private void SetupUI()
+        {
+            _commandList.ItemsSource = _filteredCommands;
+            _commandList.MouseDoubleClick += (s, e) => ExecuteSelectedCommand();
+
+            RefreshCommandList();
         }
 
         private void SetupHotKeyListener()
@@ -402,7 +466,7 @@ namespace CommandLauncher
                 Name = configCmd.Name,
                 Description = configCmd.Description,
                 Shell = configCmd.Shell,
-                HotKey = configCmd.HotKey,
+                HotKey = configCmd.HotKey ?? string.Empty,
                 LastExecuted = AppState.Instance.GetCommandLastExecutedTime(configCmd.Name),
             }).ToList();
 
@@ -529,7 +593,7 @@ namespace CommandLauncher
             {
                 foreach (var cmd in AppConfig.Instance.Config.Commands)
                 {
-                    if (IsHotKeyMatch(cmd.HotKey, e))
+                    if (cmd.HotKey != null && IsHotKeyMatch(cmd.HotKey, e))
                     {
                         ExecuteCommand(new Command
                         {

@@ -12,7 +12,7 @@ namespace CommandLauncher
         public string Name { get; set; } = "";
         public string Description { get; set; } = "";
         public string Shell { get; set; } = "";
-        public string HotKey { get; set; } = "";
+        public string? HotKey { get; set; } = "";
     }
 
     // 配置文件模型
