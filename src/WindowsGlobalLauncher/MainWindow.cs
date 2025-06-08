@@ -443,7 +443,7 @@ namespace CommandLauncher
             _searchBox.SelectAll();
             _placeholder.Visibility = string.IsNullOrEmpty(_searchBox.Text) ? Visibility.Visible : Visibility.Hidden;
 
-            RefreshCommandList();
+            RefreshCommandList(_searchBox.Text);
             ScrollCommandListToTop();
         }
 
@@ -714,10 +714,6 @@ namespace CommandLauncher
             processInfo.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
             Process.Start(processInfo);
-
-            AppState.Instance.SetCommandLastExecutedTime(selectedCommand.Name, DateTime.Now);
-
-            HideWindow();
         }
 
         private void ExecuteCommand(Command selectedCommand)
@@ -802,11 +798,6 @@ namespace CommandLauncher
         private void HideWindow()
         {
             Hide();
-            if (!_preserveSearchText)
-            {
-                _searchBox.Clear();
-            }
-            _preserveSearchText = false;
         }
 
         private void ExitApplication()
