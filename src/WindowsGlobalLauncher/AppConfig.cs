@@ -12,6 +12,7 @@ namespace CommandLauncher
         public string Name { get; set; } = "";
         public string Description { get; set; } = "";
         public string Shell { get; set; } = "";
+        public string HotKey { get; set; } = "";
     }
 
     // 配置文件模型
@@ -166,11 +167,11 @@ namespace CommandLauncher
                 HotKey = DefaultHotKey,
                 Commands =
                 [
-                    new() { Name = "记事本", Description = "打开Windows记事本", Shell = "notepad.exe" },
-                    new() { Name = "计算器", Description = "打开Windows计算器", Shell = "calc.exe" },
-                    new() { Name = "命令提示符", Description = "打开命令提示符", Shell = "cmd.exe" },
-                    new() { Name = "画图", Description = "打开Windows画图程序", Shell = "mspaint.exe" },
-                    new() { Name = "任务管理器", Description = "打开任务管理器", Shell = "taskmgr.exe" }
+                    new() { Name = "记事本", Description = "打开Windows记事本", Shell = "notepad.exe" , HotKey = "" },
+                    new() { Name = "计算器", Description = "打开Windows计算器", Shell = "calc.exe" , HotKey = "" },
+                    new() { Name = "命令提示符", Description = "打开命令提示符", Shell = "cmd.exe" , HotKey = "" },
+                    new() { Name = "画图", Description = "打开Windows画图程序", Shell = "mspaint.exe" , HotKey = "" },
+                    new() { Name = "任务管理器", Description = "打开任务管理器", Shell = "taskmgr.exe" , HotKey = "" }
                 ]
             };
             SaveConfig();
@@ -263,7 +264,7 @@ namespace CommandLauncher
   // 全局热键配置 (支持: Ctrl, Alt, Shift, Win + 字母/数字/功能键)
   // 示例: ""Ctrl+Space"", ""Alt+R"", ""Win+L""
   ""HotKey"": """ + _config.HotKey + @""",
-  // 命令列表
+  // 命令列表 (每个命令可选配置 HotKey)
   ""Commands"": [";
 
                 for (int i = 0; i < _config.Commands.Count; i++)
@@ -274,6 +275,7 @@ namespace CommandLauncher
       ""Name"": ""{cmd.Name}"",
       ""Description"": ""{cmd.Description}"",
       ""Shell"": ""{cmd.Shell}"",
+      ""HotKey"": ""{cmd.HotKey}""
     }}";
                     if (i < _config.Commands.Count - 1)
                         jsonWithComments += ",";
