@@ -98,6 +98,7 @@ namespace CommandLauncher
         private bool _disposed = false;
 
         private readonly TextBox _searchBox = CreateSearchBox();
+        private readonly TextBlock _placeholder = CreatePlaceholder();
         private readonly ListBox _commandList = CreateCommandList();
 
         public MainWindow()
@@ -171,6 +172,19 @@ namespace CommandLauncher
             };
         }
 
+        private static TextBlock CreatePlaceholder()
+        {
+            return new TextBlock
+            {
+                Text = "输入字符搜索（ctrl+p, ctrl+n上下选择，回车执行）",
+                FontSize = 16,
+                Padding = new Thickness(15, 8, 15, 8),
+                Foreground = new SolidColorBrush(Color.FromArgb(255, 150, 150, 150)),
+                VerticalAlignment = VerticalAlignment.Top,
+                IsHitTestVisible = false
+            };
+        }
+
         private static ListBox CreateCommandList()
         {
             return new ListBox
@@ -204,7 +218,7 @@ namespace CommandLauncher
 
             // 搜索框
             _searchBox.TextChanged += SearchBox_TextChanged;
-            _searchBox.KeyDown += SearchBox_KeyDown;
+            _searchBox.PreviewKeyDown += SearchBox_KeyDown;
 
             // 设置ListBox样式 - 更宽松的设计
             var listBoxStyle = new Style(typeof(ListBoxItem));
@@ -305,6 +319,7 @@ namespace CommandLauncher
             ScrollViewer.SetVerticalScrollBarVisibility(_commandList, ScrollBarVisibility.Hidden);
 
             mainGrid.Children.Add(_searchBox);
+            mainGrid.Children.Add(_placeholder);
             mainGrid.Children.Add(_commandList);
 
             Content = mainGrid;
@@ -421,6 +436,7 @@ namespace CommandLauncher
 
             _searchBox.Focus();
             _searchBox.SelectAll();
+            _placeholder.Visibility = string.IsNullOrEmpty(_searchBox.Text) ? Visibility.Visible : Visibility.Hidden;
 
             RefreshCommandList();
             SelectLastExecutedCommand();
@@ -544,6 +560,7 @@ namespace CommandLauncher
         {
             var searchBox = (TextBox)sender;
             RefreshCommandList(searchBox.Text);
+            _placeholder.Visibility = string.IsNullOrEmpty(searchBox.Text) ? Visibility.Visible : Visibility.Hidden;
 
             if (_filteredCommands.Count > 0)
             {
