@@ -1,3 +1,6 @@
+# 停止进程
+Stop-Process -Name 'WindowsGlobalLauncher' -Force
+
 # 删除旧的发布目录
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "bin\Release"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "dist"
@@ -13,3 +16,6 @@ if (-Not (Test-Path -Path $publishDir)) {
 
 # 拷贝exe到发布目录
 Copy-Item -Path "src\WindowsGlobalLauncher\bin\Release\net8.0-windows\win-x64\publish\WindowsGlobalLauncher.exe" -Destination $publishDir
+
+# 启动进程
+Start-Process -FilePath "$publishDir\WindowsGlobalLauncher.exe"

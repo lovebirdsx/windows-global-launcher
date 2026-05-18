@@ -231,6 +231,7 @@ namespace CommandLauncher
             listBoxStyle.Setters.Add(new Setter(MarginProperty, new Thickness(2)));
             listBoxStyle.Setters.Add(new Setter(BackgroundProperty, Brushes.Transparent));
             listBoxStyle.Setters.Add(new Setter(BorderThicknessProperty, new Thickness(0)));
+            listBoxStyle.Setters.Add(new Setter(HeightProperty, 52.0)); // 固定行高，确保每行高度一致
 
             // 鼠标悬停效果
             var hoverTrigger = new Trigger
@@ -313,15 +314,15 @@ namespace CommandLauncher
             shellTextBlock.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Right);
             shellTextBlock.SetValue(TextBlock.FontFamilyProperty, new FontFamily("Consolas, Courier New"));
             shellTextBlock.SetValue(MarginProperty, new Thickness(10, 0, 0, 0));
-            shellTextBlock.SetValue(TextBlock.TextWrappingProperty, TextWrapping.Wrap); // 启用自动换行
+            shellTextBlock.SetValue(TextBlock.TextWrappingProperty, TextWrapping.WrapWithOverflow);
             shellTextBlock.SetValue(TextBlock.TextAlignmentProperty, TextAlignment.Right); // 右对齐
-            shellTextBlock.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis); // 添加文本截断
-            shellTextBlock.SetValue(MaxWidthProperty, 300.0); // 设置最大宽度，避免过宽
+            shellTextBlock.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis); // 超出截断显示省略号
             gridFactory.AppendChild(shellTextBlock);
 
             dataTemplate.VisualTree = gridFactory;
             _commandList.ItemTemplate = dataTemplate;
             ScrollViewer.SetVerticalScrollBarVisibility(_commandList, ScrollBarVisibility.Hidden);
+            ScrollViewer.SetHorizontalScrollBarVisibility(_commandList, ScrollBarVisibility.Disabled); // 禁用横向滚动，确保列宽受约束使省略号生效
 
             mainGrid.Children.Add(_searchBox);
             mainGrid.Children.Add(_placeholder);
@@ -706,14 +707,60 @@ namespace CommandLauncher
                 return;
             }
 
-            Logger.LogInfo($"执行命令: {selectedCommand.Name} ({selectedCommand.Shell})");
+            string commandName = selectedCommand.Name;
+            string commandShell = selectedCommand.Shell;
+            bool useShellExecute = selectedCommand.UseShellExecute;
 
-            var processInfo = ParseShellCommand(selectedCommand.Shell);
-            processInfo.UseShellExecute = true;
+            Logger.LogInfo($"执行命令: {commandName} ({commandShell}), UseShellExecute={useShellExecute}");
+
+            var processInfo = ParseShellCommand(commandShell);
+            processInfo.UseShellExecute = useShellExecute;
             processInfo.CreateNoWindow = false;
+            processInfo.RedirectStandardError = !useShellExecute;
             processInfo.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-            Process.Start(processInfo);
+            var process = Process.Start(processInfo);
+            if (process == null)
+            {
+                Logger.LogWarning($"命令已启动但无法获取进程句柄（可能由 OS 复用已有进程）: {commandName} ({commandShell})");
+                return;
+            }
+
+            var stderrBuilder = new System.Text.StringBuilder();
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (e.Data != null)
+                    stderrBuilder.AppendLine(e.Data);
+            };
+            process.BeginErrorReadLine();
+
+            process.EnableRaisingEvents = true;
+            process.Exited += (_, _) =>
+            {
+                int exitCode = process.ExitCode;
+                string stderr = stderrBuilder.ToString().Trim();
+
+                if (exitCode != 0 && useShellExecute)
+                {
+                    string logDetail = string.IsNullOrEmpty(stderr)
+                        ? $"ExitCode={exitCode}"
+                        : $"ExitCode={exitCode}, Stderr: {stderr}";
+                    Logger.LogError($"命令执行失败: {commandName} ({commandShell}), {logDetail}",
+                        new Exception($"Process exited with code {exitCode}"));
+
+                    string popupMsg = string.IsNullOrEmpty(stderr)
+                        ? $"命令: {commandName}\n退出码: {exitCode}"
+                        : $"命令: {commandName}\n退出码: {exitCode}\n\n错误信息:\n{stderr}";
+                    Dispatcher.InvokeAsync(() =>
+                        MessageBox.Show(popupMsg, "执行失败", MessageBoxButton.OK, MessageBoxImage.Error));
+                }
+                else
+                {
+                    Logger.LogInfo($"命令执行完毕: {commandName} ({commandShell}), ExitCode={exitCode}");
+                }
+
+                process.Dispose();
+            };
         }
 
         private void ExecuteCommand(Command selectedCommand)

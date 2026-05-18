@@ -9,6 +9,7 @@ namespace CommandLauncher
         public required string Name { get; set; }
         public required string Description { get; set; }
         public required string Shell { get; set; }
+        public bool UseShellExecute { get; set; } = false;
         public string HotKey { get; set; } = "";
         public DateTime LastExecuted { get; set; } = DateTime.MinValue;
         public double MatchScore { get; set; } = 0;
