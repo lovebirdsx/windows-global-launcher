@@ -12,6 +12,7 @@ namespace CommandLauncher
         public bool UseShellExecute { get; set; } = false;
         public string HotKey { get; set; } = "";
         public DateTime LastExecuted { get; set; } = DateTime.MinValue;
+        public int ExecuteCount { get; set; } = 0;
         public double MatchScore { get; set; } = 0;
 
         public event PropertyChangedEventHandler? PropertyChanged;

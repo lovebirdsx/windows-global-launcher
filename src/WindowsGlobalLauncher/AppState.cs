@@ -12,6 +12,7 @@ namespace CommandLauncher
         {
             public string Name { get; set; } = "";
             public DateTime LastExecuted { get; set; } = DateTime.MinValue;
+            public int ExecuteCount { get; set; } = 0;
         }
 
         class State
@@ -78,17 +79,23 @@ namespace CommandLauncher
         {
             return _state.CommandExecuteInfos.FirstOrDefault(info => info.Name == name)?.LastExecuted ?? DateTime.MinValue;
         }
-        
-        public void SetCommandLastExecutedTime(string name, DateTime lastExecuted)
+
+        public int GetCommandExecuteCount(string name)
+        {
+            return _state.CommandExecuteInfos.FirstOrDefault(info => info.Name == name)?.ExecuteCount ?? 0;
+        }
+
+        public void RecordCommandExecution(string name)
         {
             var info = _state.CommandExecuteInfos.FirstOrDefault(i => i.Name == name);
             if (info != null)
             {
-                info.LastExecuted = lastExecuted;
+                info.LastExecuted = DateTime.Now;
+                info.ExecuteCount++;
             }
             else
             {
-                _state.CommandExecuteInfos.Add(new CommandExecuteInfo { Name = name, LastExecuted = lastExecuted });
+                _state.CommandExecuteInfos.Add(new CommandExecuteInfo { Name = name, LastExecuted = DateTime.Now, ExecuteCount = 1 });
             }
             SaveState();
         }

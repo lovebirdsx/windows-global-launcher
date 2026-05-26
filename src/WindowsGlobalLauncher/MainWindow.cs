@@ -31,6 +31,47 @@ namespace CommandLauncher
         }
     }
 
+    // 执行统计转换器：将 ExecuteCount + LastExecuted 合成 "3× · 5m"（count=0 时只显示时间）
+    public class ExecuteStatsConverter : IMultiValueConverter
+    {
+        public object Convert(object[] values, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (values.Length >= 2 && values[0] is int count && values[1] is DateTime lastExecuted
+                && lastExecuted != DateTime.MinValue)
+            {
+                string timeStr = FormatFriendlyTime(lastExecuted);
+                if (count > 0)
+                    return string.IsNullOrEmpty(timeStr) ? $"{count}×" : $"{count}× · {timeStr}";
+                return timeStr;
+            }
+            return "";
+        }
+
+        public object[] ConvertBack(object value, Type[] targetTypes, object parameter, CultureInfo culture)
+            => throw new NotImplementedException();
+
+        private static string FormatFriendlyTime(DateTime dt)
+        {
+            if (dt == DateTime.MinValue) return "";
+            var elapsed = DateTime.Now - dt;
+            if (elapsed.TotalSeconds < 60)  return $"{(int)elapsed.TotalSeconds}s";
+            if (elapsed.TotalMinutes < 60)  return $"{(int)elapsed.TotalMinutes}m";
+            if (elapsed.TotalHours   < 24)  return $"{(int)elapsed.TotalHours}h";
+            if (elapsed.TotalDays    < 365) return $"{(int)elapsed.TotalDays}d";
+            return $"{(int)(elapsed.TotalDays / 365)}y";
+        }
+    }
+
+    // 执行统计可见性转换器（绑定 LastExecuted：有执行记录时显示，否则隐藏）
+    public class ExecuteStatsVisibilityConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+            => value is DateTime dt && dt != DateTime.MinValue ? Visibility.Visible : Visibility.Collapsed;
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+            => throw new NotImplementedException();
+    }
+
     // 命令名称与快捷键组合转换器
     public class CommandNameWithHotKeyConverter : IMultiValueConverter
     {
@@ -258,8 +299,6 @@ namespace CommandLauncher
             var gridFactory = new FrameworkElementFactory(typeof(Grid));
 
             // 定义两列：左侧内容列 (*)，右侧Shell命令列 (最大50%)
-            var leftColumn = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) };
-            var rightColumn = new ColumnDefinition { Width = new GridLength(0.5, GridUnitType.Star), MaxWidth = double.PositiveInfinity };
             gridFactory.AddHandler(
                 LoadedEvent,
                 new RoutedEventHandler((s, e) =>
@@ -267,7 +306,7 @@ namespace CommandLauncher
                     var g = (Grid)s;
                     g.ColumnDefinitions.Clear();
                     g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(0.5, GridUnitType.Star), MaxWidth = double.PositiveInfinity });
+                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MaxWidth = double.PositiveInfinity });
                 })
             );
 
@@ -304,20 +343,39 @@ namespace CommandLauncher
             leftStack.AppendChild(descTextBlock);
             gridFactory.AppendChild(leftStack);
 
-            // 右侧Shell命令
+            // 右侧列 - StackPanel (Shell + 执行统计)
+            var rightStack = new FrameworkElementFactory(typeof(StackPanel));
+            rightStack.SetValue(Grid.ColumnProperty, 1);
+            rightStack.SetValue(StackPanel.OrientationProperty, Orientation.Vertical);
+            rightStack.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+            rightStack.SetValue(MarginProperty, new Thickness(10, 0, 0, 0));
+
+            // 执行统计文本："3× · 5m"
+            var statsTextBlock = new FrameworkElementFactory(typeof(TextBlock));
+            var statsBinding = new MultiBinding { Converter = new ExecuteStatsConverter() };
+            statsBinding.Bindings.Add(new Binding("ExecuteCount"));
+            statsBinding.Bindings.Add(new Binding("LastExecuted"));
+            statsTextBlock.SetBinding(TextBlock.TextProperty, statsBinding);
+            statsTextBlock.SetValue(TextBlock.FontSizeProperty, 12.0);
+            statsTextBlock.SetValue(MarginProperty, new Thickness(0, 0, 0, 2));
+            statsTextBlock.SetValue(TextBlock.ForegroundProperty, Brushes.White);
+            statsTextBlock.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Right);
+            statsTextBlock.SetValue(TextBlock.TextAlignmentProperty, TextAlignment.Right);
+            statsTextBlock.SetBinding(VisibilityProperty, new Binding("LastExecuted") { Converter = new ExecuteStatsVisibilityConverter() });
+
+            // Shell 命令文本
             var shellTextBlock = new FrameworkElementFactory(typeof(TextBlock));
-            shellTextBlock.SetValue(Grid.ColumnProperty, 1);
             shellTextBlock.SetBinding(TextBlock.TextProperty, new Binding("Shell"));
             shellTextBlock.SetValue(TextBlock.FontSizeProperty, 10.0);
             shellTextBlock.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromArgb(255, 120, 120, 120)));
-            shellTextBlock.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
             shellTextBlock.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Right);
             shellTextBlock.SetValue(TextBlock.FontFamilyProperty, new FontFamily("Consolas, Courier New"));
-            shellTextBlock.SetValue(MarginProperty, new Thickness(10, 0, 0, 0));
-            shellTextBlock.SetValue(TextBlock.TextWrappingProperty, TextWrapping.WrapWithOverflow);
-            shellTextBlock.SetValue(TextBlock.TextAlignmentProperty, TextAlignment.Right); // 右对齐
-            shellTextBlock.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis); // 超出截断显示省略号
-            gridFactory.AppendChild(shellTextBlock);
+            shellTextBlock.SetValue(TextBlock.TextAlignmentProperty, TextAlignment.Right);
+            shellTextBlock.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
+
+            rightStack.AppendChild(statsTextBlock);
+            rightStack.AppendChild(shellTextBlock);
+            gridFactory.AppendChild(rightStack);
 
             dataTemplate.VisualTree = gridFactory;
             _commandList.ItemTemplate = dataTemplate;
@@ -490,6 +548,7 @@ namespace CommandLauncher
                 Shell = configCmd.Shell,
                 HotKey = configCmd.HotKey ?? string.Empty,
                 LastExecuted = AppState.Instance.GetCommandLastExecutedTime(configCmd.Name),
+                ExecuteCount = AppState.Instance.GetCommandExecuteCount(configCmd.Name),
             }).ToList();
 
             // 加入对本应用程序的特殊处理
@@ -498,7 +557,8 @@ namespace CommandLauncher
                 Name = "config",
                 Description = "打开windows-global-launcher的配置文件",
                 Shell = "config",
-                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("config")
+                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("config"),
+                ExecuteCount = AppState.Instance.GetCommandExecuteCount("config")
             });
 
             commands.Add(new Command
@@ -506,7 +566,8 @@ namespace CommandLauncher
                 Name = "setconfig",
                 Description = "设定windows-global-launcher的配置文件",
                 Shell = "setconfig",
-                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("setconfig")
+                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("setconfig"),
+                ExecuteCount = AppState.Instance.GetCommandExecuteCount("setconfig")
             });
 
             commands.Add(new Command
@@ -514,7 +575,8 @@ namespace CommandLauncher
                 Name = "logs",
                 Description = "打开windows-global-launcher的日志文件",
                 Shell = "logs",
-                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("logs")
+                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("logs"),
+                ExecuteCount = AppState.Instance.GetCommandExecuteCount("logs")
             });
 
             commands.Add(new Command
@@ -522,7 +584,8 @@ namespace CommandLauncher
                 Name = "exit",
                 Description = "退出windows-global-launcher",
                 Shell = "exit",
-                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("exit")
+                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("exit"),
+                ExecuteCount = AppState.Instance.GetCommandExecuteCount("exit")
             });
 
             if (!string.IsNullOrEmpty(filter))
@@ -769,7 +832,7 @@ namespace CommandLauncher
             {
                 _preserveSearchText = !string.IsNullOrEmpty(_searchBox.Text);
                 ExecuteCommandImpl(selectedCommand);
-                AppState.Instance.SetCommandLastExecutedTime(selectedCommand.Name, DateTime.Now);
+                AppState.Instance.RecordCommandExecution(selectedCommand.Name);
                 HideWindow();
             }
             catch (Exception ex)
