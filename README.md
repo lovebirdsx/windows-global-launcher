@@ -1,20 +1,39 @@
-# 说明
+# Windows Global Launcher
 
-本项目是一个 Windows 平台的命令行工具启动器，旨在通过系统托盘图标快速启动常用命令行工具。
+常驻系统托盘的 Windows 桌面工具,包含两个相互独立的功能:命令启动器与 Alt+Tab 窗口切换器。平时隐藏在后台,靠全局热键唤出。
 
-该软件支持通过 JSON 配置文件定义要显示的指令列表，每个指令可单独配置快捷键，
-一旦设置快捷键，在界面中会显示对应提示，并且在窗口弹出后即可触发。
+## 功能
 
-## 开发
+### 命令启动器
 
-项目源码位于 `src/WindowsGlobalLauncher` 目录，解决方案文件为 `WindowsGlobalLauncher.sln`。
+全局热键(默认 `Ctrl+Shift+I`)弹出搜索式命令面板,从 JSON 配置读取命令并执行。
 
-* 单元测试：`dotnet test`
-* 发布: `.\scripts\publish.ps1`
+* 模糊搜索,按使用频率(执行次数 / 最近使用)排序
+* 每条命令可单独配置热键,窗口弹出后即可直接触发
+* 列表中会显示命令的执行次数与上次执行时间
+
+### Alt+Tab 窗口切换器
+
+接管系统 Alt+Tab,竖向列出当前窗口(图标 + 标题)供切换。`Alt+Tab` 向后、`Shift+Tab` 向前,松开 `Alt` 选中,`Esc` 取消。
 
 ## 运行
 
-要求 .NET 8 运行时
+* 要求 **.NET 8 运行时**
+* **需以管理员权限运行**:窗口切换器依赖低级键盘钩子,否则无法拦截以管理员权限运行的程序的 Alt+Tab
+* 程序常驻系统托盘,右键托盘菜单可打开配置、查看日志或退出
+
+## 配置
+
+数据目录为 `%USERPROFILE%\.windows-global-launcher\`,默认配置文件为 `WindowsCommandLauncher.json`(首次运行自动生成)。修改配置文件后会自动重新加载。
+
+在搜索框输入以下内置命令可直接操作:
+
+| 命令 | 说明 |
+| --- | --- |
+| `config` | 打开配置文件 |
+| `setconfig` | 选择 / 切换配置文件 |
+| `logs` | 查看日志 |
+| `exit` | 退出程序 |
 
 ### 配置文件示例
 
@@ -31,4 +50,14 @@
     }
   ]
 }
+```
+
+## 开发
+
+源码位于 `src/WindowsGlobalLauncher`,解决方案文件为 `WindowsGlobalLauncher.sln`。
+
+```bash
+dotnet build        # 编译
+dotnet test         # 运行单元测试
+.\scripts\publish.ps1   # 发布并启动(PowerShell)
 ```
