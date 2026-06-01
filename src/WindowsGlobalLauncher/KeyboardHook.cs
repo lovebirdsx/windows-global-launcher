@@ -49,11 +49,12 @@ namespace CommandLauncher
 
         private const int VK_TAB = 0x09;
         private const int VK_SHIFT = 0x10;
-        private const int VK_CONTROL = 0x11;
         private const int VK_MENU = 0x12;   // Alt
         private const int VK_ESCAPE = 0x1B;
         private const int VK_UP = 0x26;
         private const int VK_DOWN = 0x28;
+        private const int VK_J = 0x4A;
+        private const int VK_K = 0x4B;
         private const int VK_N = 0x4E;
         private const int VK_P = 0x50;
         private const int VK_LMENU = 0xA4;
@@ -70,7 +71,7 @@ namespace CommandLauncher
         /// <summary>按下 Esc，取消切换。</summary>
         public event Action? Cancel;
 
-        /// <summary>切换器激活态下用方向键 / Ctrl+P / Ctrl+N 移动选择（-1 上，+1 下）。</summary>
+        /// <summary>切换器激活态下用方向键 / j,k,p,n 移动选择（-1 上，+1 下）。</summary>
         public event Action<int>? Navigate;
 
         /// <summary>由切换器提供：当前切换器是否处于激活态（决定是否吞掉 Esc / 触发 Commit）。</summary>
@@ -116,21 +117,19 @@ namespace CommandLauncher
                     return (IntPtr)1; // 吞掉，阻止系统原生 Alt+Tab
                 }
 
-                // 切换器激活态下的键盘导航（方向键 / Ctrl+P / Ctrl+N / Esc），一律吞掉
+                // 切换器激活态下的键盘导航（方向键 / j,k,p,n / Esc），一律吞掉
                 if (active && isKeyDown)
                 {
                     switch (vk)
                     {
                         case VK_UP:
+                        case VK_K:
+                        case VK_P:
                             Navigate?.Invoke(-1);
                             return (IntPtr)1;
                         case VK_DOWN:
-                            Navigate?.Invoke(1);
-                            return (IntPtr)1;
-                        case VK_P when IsKeyPressed(VK_CONTROL):
-                            Navigate?.Invoke(-1);
-                            return (IntPtr)1;
-                        case VK_N when IsKeyPressed(VK_CONTROL):
+                        case VK_J:
+                        case VK_N:
                             Navigate?.Invoke(1);
                             return (IntPtr)1;
                         case VK_ESCAPE:

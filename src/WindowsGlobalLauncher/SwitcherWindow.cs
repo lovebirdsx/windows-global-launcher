@@ -17,6 +17,7 @@ namespace CommandLauncher
     {
         private const double RowHeight = 56;
         private const double WindowWidth = 560;
+        private const double WindowHeight = 800; // 固定高度，不随窗口数量变化
 
         private readonly ObservableCollection<WindowInfo> _items = [];
         private readonly ListBox _list = CreateList();
@@ -60,10 +61,10 @@ namespace CommandLauncher
         {
             Title = "Window Switcher";
             Width = WindowWidth;
-            Height = 200;
+            Height = WindowHeight;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
-            Background = new SolidColorBrush(Color.FromArgb(240, 30, 30, 30));
+            Background = Brushes.Transparent; // 背景与描边/圆角统一由外层 Border 承载
             Topmost = true;
             ShowInTaskbar = false;
             ShowActivated = false; // 不抢焦点，保持目标窗口前台历史，使 SetForegroundWindow 可靠
@@ -110,14 +111,24 @@ namespace CommandLauncher
             template.VisualTree = panel;
             _list.ItemTemplate = template;
             ScrollViewer.SetHorizontalScrollBarVisibility(_list, ScrollBarVisibility.Disabled);
+            ScrollViewer.SetVerticalScrollBarVisibility(_list, ScrollBarVisibility.Auto); // 内容溢出时才出现，不常驻
             ApplyFlatScrollBar();
 
             _list.ItemsSource = _items;
             _list.MouseDoubleClick += (s, e) => Commit();
 
+            // 外层 Border：深色半透明背景 + 轻度描边 + 圆角，避免在黑色应用上弹窗边界不明显
+            var root = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(240, 30, 30, 30)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(90, 255, 255, 255)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+            };
             var grid = new Grid { Margin = new Thickness(12) };
             grid.Children.Add(_list);
-            Content = grid;
+            root.Child = grid;
+            Content = root;
         }
 
         #region 钩子事件（运行在钩子回调即 UI 线程；重活投递到 Dispatcher 异步执行以快速返回）
@@ -169,7 +180,7 @@ namespace CommandLauncher
             _list.SelectedIndex = defaultIndex;
             _list.ScrollIntoView(_list.SelectedItem);
 
-            ResizeAndCenter(windows.Count);
+            CenterOnScreen();
             Show();
             Topmost = true;
         }
@@ -208,7 +219,8 @@ namespace CommandLauncher
             Hide();
         }
 
-        private void ResizeAndCenter(int count)
+        // 固定窗口大小，仅做居中（高度超出屏幕工作区时按工作区收敛）。
+        private void CenterOnScreen()
         {
             try
             {
@@ -220,10 +232,8 @@ namespace CommandLauncher
                 double screenWidth = screen.WorkingArea.Width / dpi.DpiScaleX;
                 double screenHeight = screen.WorkingArea.Height / dpi.DpiScaleY;
 
-                double maxHeight = screenHeight * 0.8;
-                double desired = count * RowHeight + 24; // 24 = 上下边距
-                Height = Math.Min(desired, maxHeight);
                 Width = WindowWidth;
+                Height = Math.Min(WindowHeight, screenHeight);
 
                 Left = screenLeft + (screenWidth - Width) / 2;
                 Top = screenTop + (screenHeight - Height) / 2;
