@@ -96,6 +96,7 @@ namespace CommandLauncher
         private const int GCLP_HICON = -14;
         private const int GCLP_HICONSM = -34;
         private const uint SMTO_ABORTIFHUNG = 0x0002;
+        private const uint WM_CLOSE = 0x0010;
 
         private const int DWMWA_CLOAKED = 14;
 
@@ -178,6 +179,25 @@ namespace CommandLauncher
             catch (Exception ex)
             {
                 Logger.LogError($"激活窗口失败: {hwnd}", ex);
+            }
+        }
+
+        /// <summary>
+        /// 优雅关闭指定窗口：发送 WM_CLOSE（等同点窗口右上角的 X），
+        /// 给程序保存数据的机会，不强杀进程。
+        /// 用 SendMessageTimeout + SMTO_ABORTIFHUNG，避免被卡死窗口阻塞调用线程。
+        /// </summary>
+        public static void CloseWindow(IntPtr hwnd)
+        {
+            try
+            {
+                SendMessageTimeout(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero,
+                    SMTO_ABORTIFHUNG, 1000, out _);
+                Logger.LogInfo($"已请求关闭窗口: {hwnd}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"关闭窗口失败: {hwnd}", ex);
             }
         }
 

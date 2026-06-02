@@ -57,6 +57,7 @@ namespace CommandLauncher
         private const int VK_K = 0x4B;
         private const int VK_N = 0x4E;
         private const int VK_P = 0x50;
+        private const int VK_X = 0x58;
         private const int VK_LMENU = 0xA4;
         private const int VK_RMENU = 0xA5;
 
@@ -73,6 +74,9 @@ namespace CommandLauncher
 
         /// <summary>切换器激活态下用方向键 / j,k,p,n 移动选择（-1 上，+1 下）。</summary>
         public event Action<int>? Navigate;
+
+        /// <summary>切换器激活态下按 x，关闭当前选中窗口。</summary>
+        public event Action? Close;
 
         /// <summary>由切换器提供：当前切换器是否处于激活态（决定是否吞掉 Esc / 触发 Commit）。</summary>
         public Func<bool>? IsSwitcherActive { get; set; }
@@ -135,6 +139,9 @@ namespace CommandLauncher
                         case VK_ESCAPE:
                             Cancel?.Invoke();
                             return (IntPtr)1;
+                        case VK_X:
+                            Close?.Invoke();
+                            return (IntPtr)1; // 吞掉，避免 x 落入目标窗口
                     }
                 }
 

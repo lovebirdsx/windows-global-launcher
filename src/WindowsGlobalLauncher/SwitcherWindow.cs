@@ -39,6 +39,7 @@ namespace CommandLauncher
             _hook.Commit += OnCommit;
             _hook.Cancel += OnCancel;
             _hook.Navigate += OnNavigate;
+            _hook.Close += OnClose;
             _hook.IsSwitcherActive = () => _isActive;
             _hook.Install();
 
@@ -153,6 +154,9 @@ namespace CommandLauncher
         private void OnNavigate(int direction)
             => Dispatcher.BeginInvoke(() => { if (_isActive) MoveSelection(direction); });
 
+        private void OnClose()
+            => Dispatcher.BeginInvoke(() => { if (_isActive) CloseSelected(); });
+
         #endregion
 
         private void ShowSwitcher(bool reverse)
@@ -193,6 +197,29 @@ namespace CommandLauncher
 
             int idx = (_list.SelectedIndex + direction + n) % n;
             _list.SelectedIndex = idx;
+            _list.ScrollIntoView(_list.SelectedItem);
+        }
+
+        // 关闭当前选中窗口，并保持切换器激活。
+        private void CloseSelected()
+        {
+            if (!_isActive || !IsVisible || _list.SelectedItem is not WindowInfo target)
+                return;
+
+            int idx = _list.SelectedIndex;
+            WindowEnumerator.CloseWindow(target.Hwnd);
+
+            // WM_CLOSE 是异步请求，目标窗口此刻通常尚未销毁；直接从列表移除作为即时反馈，
+            // 避免立即重新枚举又把它加回来。
+            _items.RemoveAt(idx);
+
+            if (_items.Count == 0)
+            {
+                Cancel(); // 列表空了，隐藏并复位
+                return;
+            }
+
+            _list.SelectedIndex = Math.Min(idx, _items.Count - 1);
             _list.ScrollIntoView(_list.SelectedItem);
         }
 

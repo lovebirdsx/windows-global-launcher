@@ -60,3 +60,7 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 ## 日志
 
 `Logger` 写入 `App.BaseDir` 下按日期轮转的日志（自动清理 3 天前），可通过托盘菜单或内置 `logs` 命令打开。排查运行期问题优先看日志。
+
+## 其它
+
+- 修改或者新增功能，有必要的话，则同步更新CLAUDE.md和README.md
