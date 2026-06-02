@@ -41,6 +41,8 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 
 **内置命令**：`config` / `setconfig` / `logs` / `exit` 在 `MainWindow.RefreshCommandList` 中动态注入命令列表，由 `ExecuteAppCommand` 特殊处理，而非走 `Process.Start`。
 
+**子进程降权（普通用户权限启动）**：见 `MediumIntegrityProcess.cs`。launcher 自身以管理员运行，直接 `Process.Start` 出的子进程会继承管理员令牌。`MainWindow.ExecuteCommandImpl` 默认借用桌面 Shell（explorer.exe）令牌、通过 `MediumIntegrityProcess.Start`（`GetShellWindow` → 复制令牌 → `CreateProcessWithTokenW`）以中等完整性级别启动命令，等同用户桌面双击。`ConfigCommand`/`Command` 的 `RunAsAdmin` 字段（默认 `false`）控制：为 `true` 时走原 `Process.Start` 路径保留管理员权限。降权失败时抛异常 → 上层 `catch` 弹窗报错且不启动（不回退到管理员）。降权路径等价于 `UseShellExecute=false` 的直接 `CreateProcess`，不支持 URL/文档关联启动，也不做 stderr 重定向/退出码监听。新增/修改 `RunAsAdmin` 字段时记得同步 `AppConfig.SaveConfig` 的手写 JSON 拼接（布尔值要输出小写 `true`/`false`）。
+
 **两套热键机制（不要混淆）**：
 - 命令启动器用 `HotKeyListener`（`user32.dll` 的 `RegisterHotKey` + 隐藏消息窗口接收 `WM_HOTKEY`）。注意系统占用的组合键（如 `Alt+Tab`）无法用 `RegisterHotKey` 注册。
 - 切换器用 `KeyboardHook`（`WH_KEYBOARD_LL` 低级键盘钩子），才能拦截并「吞掉」(`return (IntPtr)1`) 系统原生 Alt+Tab。

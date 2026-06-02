@@ -10,6 +10,7 @@ namespace CommandLauncher
         public required string Description { get; set; }
         public required string Shell { get; set; }
         public bool UseShellExecute { get; set; } = false;
+        public bool RunAsAdmin { get; set; } = false;
         public string HotKey { get; set; } = "";
         public DateTime LastExecuted { get; set; } = DateTime.MinValue;
         public int ExecuteCount { get; set; } = 0;

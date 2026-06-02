@@ -13,6 +13,8 @@ namespace CommandLauncher
         public string Description { get; set; } = "";
         public string Shell { get; set; } = "";
         public string? HotKey { get; set; } = "";
+        // 是否以管理员权限启动该命令。默认 false（普通用户权限），true 时保留管理员权限启动。
+        public bool RunAsAdmin { get; set; } = false;
     }
 
     // 配置文件模型
@@ -264,7 +266,7 @@ namespace CommandLauncher
   // 全局热键配置 (支持: Ctrl, Alt, Shift, Win + 字母/数字/功能键)
   // 示例: ""Ctrl+Space"", ""Alt+R"", ""Win+L""
   ""HotKey"": """ + _config.HotKey + @""",
-  // 命令列表 (每个命令可选配置 HotKey)
+  // 命令列表 (每个命令可选配置 HotKey；RunAsAdmin=true 时以管理员权限启动，默认 false 为普通用户权限)
   ""Commands"": [";
 
                 for (int i = 0; i < _config.Commands.Count; i++)
@@ -275,7 +277,8 @@ namespace CommandLauncher
       ""Name"": ""{cmd.Name}"",
       ""Description"": ""{cmd.Description}"",
       ""Shell"": ""{cmd.Shell}"",
-      ""HotKey"": ""{cmd.HotKey}""
+      ""HotKey"": ""{cmd.HotKey}"",
+      ""RunAsAdmin"": {(cmd.RunAsAdmin ? "true" : "false")}
     }}";
                     if (i < _config.Commands.Count - 1)
                         jsonWithComments += ",";

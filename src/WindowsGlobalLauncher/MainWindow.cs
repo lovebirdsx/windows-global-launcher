@@ -547,6 +547,7 @@ namespace CommandLauncher
                 Description = configCmd.Description,
                 Shell = configCmd.Shell,
                 HotKey = configCmd.HotKey ?? string.Empty,
+                RunAsAdmin = configCmd.RunAsAdmin,
                 LastExecuted = AppState.Instance.GetCommandLastExecutedTime(configCmd.Name),
                 ExecuteCount = AppState.Instance.GetCommandExecuteCount(configCmd.Name),
             }).ToList();
@@ -773,14 +774,27 @@ namespace CommandLauncher
             string commandName = selectedCommand.Name;
             string commandShell = selectedCommand.Shell;
             bool useShellExecute = selectedCommand.UseShellExecute;
+            bool runAsAdmin = selectedCommand.RunAsAdmin;
 
-            Logger.LogInfo($"执行命令: {commandName} ({commandShell}), UseShellExecute={useShellExecute}");
-
+            string workingDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             var processInfo = ParseShellCommand(commandShell);
+
+            // launcher 自身以管理员运行，直接启动的子进程会继承管理员令牌。
+            // 默认借用桌面 Shell 令牌降权为普通用户权限启动；RunAsAdmin=true 时才保留管理员权限。
+            if (!runAsAdmin)
+            {
+                Logger.LogInfo($"执行命令(普通权限): {commandName} ({commandShell})");
+                // 失败时抛异常，由 ExecuteCommand 的 catch 弹窗报错、不启动（不回退到管理员）。
+                MediumIntegrityProcess.Start(processInfo.FileName, processInfo.Arguments, workingDir);
+                return;
+            }
+
+            Logger.LogInfo($"执行命令(管理员权限): {commandName} ({commandShell}), UseShellExecute={useShellExecute}");
+
             processInfo.UseShellExecute = useShellExecute;
             processInfo.CreateNoWindow = false;
             processInfo.RedirectStandardError = !useShellExecute;
-            processInfo.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            processInfo.WorkingDirectory = workingDir;
 
             var process = Process.Start(processInfo);
             if (process == null)
