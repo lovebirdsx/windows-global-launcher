@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
@@ -100,6 +101,23 @@ namespace CommandLauncher
 
         private const int DWMWA_CLOAKED = 14;
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left, Top, Right, Bottom; }
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+            int X, int Y, int cx, int cy, uint uFlags);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsZoomed(IntPtr hWnd);
+
+        private const int SW_MAXIMIZE      = 3;
+        private const uint SWP_NOZORDER    = 0x0004;
+        private const uint SWP_NOACTIVATE  = 0x0010;
+
         #endregion
 
         // 进程 exe 提取出的图标较昂贵，按 exe 路径缓存
@@ -108,7 +126,8 @@ namespace CommandLauncher
         /// <summary>
         /// 枚举所有可参与 Alt+Tab 的顶层窗口，顺序为 Z 序（≈MRU，首项为当前前台窗口）。
         /// </summary>
-        public static List<WindowInfo> EnumerateWindows(IntPtr excludeHwnd)
+        public static List<WindowInfo> EnumerateWindows(IntPtr excludeHwnd,
+            IReadOnlySet<IntPtr>? flashingWindows = null)
         {
             var result = new List<WindowInfo>();
 
@@ -128,7 +147,8 @@ namespace CommandLauncher
                     Hwnd = hwnd,
                     Title = title,
                     Icon = GetWindowIcon(hwnd, pid),
-                    ProcessName = GetProcessName(pid)
+                    ProcessName = GetProcessName(pid),
+                    HasNotification = flashingWindows?.Contains(hwnd) == true
                 });
                 return true;
             }, IntPtr.Zero);
@@ -198,6 +218,57 @@ namespace CommandLauncher
             catch (Exception ex)
             {
                 Logger.LogError($"关闭窗口失败: {hwnd}", ex);
+            }
+        }
+
+        /// <summary>
+        /// 将窗口移到相邻显示器（按物理左右位置排列）。
+        /// direction = -1 左移，+1 右移；已在最左/最右时静默忽略。
+        /// 若窗口最大化，先还原再移动，然后在目标显示器上重新最大化。
+        /// </summary>
+        public static void MoveToAdjacentMonitor(IntPtr hwnd, int direction)
+        {
+            try
+            {
+                var screens = System.Windows.Forms.Screen.AllScreens
+                    .OrderBy(s => s.Bounds.Left)
+                    .ToArray();
+
+                if (screens.Length < 2)
+                    return;
+
+                var current = System.Windows.Forms.Screen.FromHandle(hwnd);
+                int idx = Array.FindIndex(screens, s => s.DeviceName == current.DeviceName);
+                if (idx < 0)
+                    return;
+
+                int targetIdx = idx + direction;
+                if (targetIdx < 0 || targetIdx >= screens.Length)
+                    return; // 已在边缘，不回绕
+
+                var target = screens[targetIdx];
+                bool wasMaximized = IsZoomed(hwnd);
+                if (wasMaximized)
+                    ShowWindow(hwnd, SW_RESTORE);
+
+                GetWindowRect(hwnd, out RECT rect);
+                int w = rect.Right - rect.Left;
+                int h = rect.Bottom - rect.Top;
+
+                var wa = target.WorkingArea;
+                int newX = Math.Max(wa.Left, Math.Min(wa.Left + (wa.Width - w) / 2, wa.Right - w));
+                int newY = Math.Max(wa.Top,  Math.Min(wa.Top  + (wa.Height - h) / 2, wa.Bottom - h));
+
+                SetWindowPos(hwnd, IntPtr.Zero, newX, newY, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+
+                if (wasMaximized)
+                    ShowWindow(hwnd, SW_MAXIMIZE);
+
+                Logger.LogInfo($"窗口 {hwnd} 已移至{(direction < 0 ? "左" : "右")}侧显示器: {target.DeviceName}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"移动窗口到相邻显示器失败: {hwnd}", ex);
             }
         }
 

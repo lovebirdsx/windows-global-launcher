@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -15,6 +17,23 @@ namespace CommandLauncher
     /// </summary>
     public class SwitcherWindow : Window, IDisposable
     {
+        #region Win32 P/Invoke（Shell Hook）
+
+        [DllImport("user32.dll")]
+        private static extern bool RegisterShellHookWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool DeregisterShellHookWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern uint RegisterWindowMessage(string lpString);
+
+        private const int HSHELL_FLASH            = 32774; // 6 | 0x8000 — 窗口请求注意（taskbar 闪烁）
+        private const int HSHELL_WINDOWACTIVATED  = 4;
+        private const int HSHELL_RUDEAPPACTIVATED = 32772; // 4 | 0x8000
+
+        #endregion
+
         private const double RowHeight = 56;
         private const double WindowWidth = 560;
         private const double WindowHeight = 800; // 固定高度，不随窗口数量变化
@@ -22,6 +41,9 @@ namespace CommandLauncher
         private readonly ObservableCollection<WindowInfo> _items = [];
         private readonly ListBox _list = CreateList();
         private readonly KeyboardHook _hook = new();
+
+        private uint _shellHookMsg;
+        private readonly HashSet<IntPtr> _flashingWindows = new();
 
         // 切换器是否处于激活态（Alt 仍按住、切换器逻辑上正在工作）。
         // 仅在 UI 线程（钩子回调线程）读写，无需加锁。
@@ -32,14 +54,20 @@ namespace CommandLauncher
         {
             InitializeComponent();
 
-            // 确保窗口句柄存在，以便枚举时排除自身
+            // 确保窗口句柄存在，以便枚举时排除自身，同时注册 shell hook
             new WindowInteropHelper(this).EnsureHandle();
+
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            _shellHookMsg = RegisterWindowMessage("SHELLHOOK");
+            RegisterShellHookWindow(hwnd);
+            HwndSource.FromHwnd(hwnd).AddHook(WndProc);
 
             _hook.AltTab += OnAltTab;
             _hook.Commit += OnCommit;
             _hook.Cancel += OnCancel;
             _hook.Navigate += OnNavigate;
             _hook.Close += OnClose;
+            _hook.MoveMonitor += OnMoveMonitor;
             _hook.IsSwitcherActive = () => _isActive;
             _hook.Install();
 
@@ -83,6 +111,10 @@ namespace CommandLauncher
             hoverTrigger.Setters.Add(new Setter(BackgroundProperty, new SolidColorBrush(Color.FromArgb(255, 55, 55, 55))));
             var selectedTrigger = new Trigger { Property = ListBoxItem.IsSelectedProperty, Value = true };
             selectedTrigger.Setters.Add(new Setter(BackgroundProperty, new SolidColorBrush(Color.FromArgb(255, 0, 120, 212))));
+            // 通知状态：背景变为 amber 暗橙，优先级低于 hover/selected（排在前面即可）
+            var notifyTrigger = new DataTrigger { Binding = new Binding("HasNotification"), Value = true };
+            notifyTrigger.Setters.Add(new Setter(BackgroundProperty, new SolidColorBrush(Color.FromRgb(120, 65, 0))));
+            itemStyle.Triggers.Add(notifyTrigger);
             itemStyle.Triggers.Add(hoverTrigger);
             itemStyle.Triggers.Add(selectedTrigger);
             _list.ItemContainerStyle = itemStyle;
@@ -157,7 +189,37 @@ namespace CommandLauncher
         private void OnClose()
             => Dispatcher.BeginInvoke(() => { if (_isActive) CloseSelected(); });
 
+        private void OnMoveMonitor(int direction)
+            => Dispatcher.BeginInvoke(() => { if (_isActive) MoveSelected(direction); });
+
         #endregion
+
+        // Shell hook WndProc：跟踪窗口闪烁状态（HSHELL_FLASH），用于在列表项显示通知圆点
+        private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (_shellHookMsg != 0 && (uint)msg == _shellHookMsg)
+            {
+                int code = (int)wParam;
+                if (code == HSHELL_FLASH)
+                {
+                    _flashingWindows.Add(lParam);
+                    UpdateNotificationDot(lParam, true);
+                }
+                else if (code == HSHELL_WINDOWACTIVATED || code == HSHELL_RUDEAPPACTIVATED)
+                {
+                    _flashingWindows.Remove(lParam);
+                    UpdateNotificationDot(lParam, false);
+                }
+            }
+            return IntPtr.Zero;
+        }
+
+        private void UpdateNotificationDot(IntPtr targetHwnd, bool value)
+        {
+            var item = _items.FirstOrDefault(w => w.Hwnd == targetHwnd);
+            if (item != null)
+                item.HasNotification = value;
+        }
 
         private void ShowSwitcher(bool reverse)
         {
@@ -165,7 +227,7 @@ namespace CommandLauncher
                 return; // 可能已被 Commit/Cancel 复位
 
             IntPtr self = new WindowInteropHelper(this).Handle;
-            List<WindowInfo> windows = WindowEnumerator.EnumerateWindows(self);
+            List<WindowInfo> windows = WindowEnumerator.EnumerateWindows(self, _flashingWindows);
 
             if (windows.Count == 0)
             {
@@ -232,6 +294,7 @@ namespace CommandLauncher
             if (IsVisible && _list.SelectedItem is WindowInfo target)
             {
                 Hide();
+                _flashingWindows.Remove(target.Hwnd);
                 WindowEnumerator.Activate(target.Hwnd);
             }
             else
@@ -244,6 +307,13 @@ namespace CommandLauncher
         {
             _isActive = false;
             Hide();
+        }
+
+        private void MoveSelected(int direction)
+        {
+            if (!_isActive || !IsVisible || _list.SelectedItem is not WindowInfo target)
+                return;
+            WindowEnumerator.MoveToAdjacentMonitor(target.Hwnd, direction);
         }
 
         // 固定窗口大小，仅做居中（高度超出屏幕工作区时按工作区收敛）。
@@ -327,6 +397,9 @@ namespace CommandLauncher
         {
             if (_disposed)
                 return;
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+                DeregisterShellHookWindow(hwnd);
             _hook.Dispose();
             _disposed = true;
             GC.SuppressFinalize(this);

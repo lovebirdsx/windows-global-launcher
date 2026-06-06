@@ -53,6 +53,8 @@ namespace CommandLauncher
         private const int VK_ESCAPE = 0x1B;
         private const int VK_UP = 0x26;
         private const int VK_DOWN = 0x28;
+        private const int VK_LEFT = 0x25;
+        private const int VK_RIGHT = 0x27;
         private const int VK_J = 0x4A;
         private const int VK_K = 0x4B;
         private const int VK_N = 0x4E;
@@ -77,6 +79,9 @@ namespace CommandLauncher
 
         /// <summary>切换器激活态下按 x，关闭当前选中窗口。</summary>
         public event Action? Close;
+
+        /// <summary>切换器激活态下按左/右方向键，将选中窗口移到相邻显示器（-1 左，+1 右）。</summary>
+        public event Action<int>? MoveMonitor;
 
         /// <summary>由切换器提供：当前切换器是否处于激活态（决定是否吞掉 Esc / 触发 Commit）。</summary>
         public Func<bool>? IsSwitcherActive { get; set; }
@@ -142,6 +147,12 @@ namespace CommandLauncher
                         case VK_X:
                             Close?.Invoke();
                             return (IntPtr)1; // 吞掉，避免 x 落入目标窗口
+                        case VK_LEFT:
+                            MoveMonitor?.Invoke(-1);
+                            return (IntPtr)1;
+                        case VK_RIGHT:
+                            MoveMonitor?.Invoke(1);
+                            return (IntPtr)1;
                     }
                 }
 
