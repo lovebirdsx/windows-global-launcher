@@ -31,6 +31,13 @@ namespace CommandLauncher
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
         [StructLayout(LayoutKind.Sequential)]
         private struct KBDLLHOOKSTRUCT
         {
@@ -46,6 +53,8 @@ namespace CommandLauncher
         private const int WM_KEYUP = 0x0101;
         private const int WM_SYSKEYDOWN = 0x0104;
         private const int WM_SYSKEYUP = 0x0105;
+        private const uint WM_SYSCOMMAND = 0x0112;
+        private const int SC_CLOSE = 0xF060;
 
         private const int VK_TAB = 0x09;
         private const int VK_SHIFT = 0x10;
@@ -59,6 +68,7 @@ namespace CommandLauncher
         private const int VK_K = 0x4B;
         private const int VK_N = 0x4E;
         private const int VK_P = 0x50;
+        private const int VK_Q = 0x51;
         private const int VK_X = 0x58;
         private const int VK_LMENU = 0xA4;
         private const int VK_RMENU = 0xA5;
@@ -124,6 +134,14 @@ namespace CommandLauncher
                     bool shift = IsKeyPressed(VK_SHIFT);
                     AltTab?.Invoke(shift);
                     return (IntPtr)1; // 吞掉，阻止系统原生 Alt+Tab
+                }
+
+                if (isKeyDown && vk == VK_Q && IsKeyPressed(VK_MENU))
+                {
+                    IntPtr hwnd = GetForegroundWindow();
+                    if (hwnd != IntPtr.Zero)
+                        PostMessage(hwnd, WM_SYSCOMMAND, (IntPtr)SC_CLOSE, IntPtr.Zero);
+                    return (IntPtr)1;
                 }
 
                 // 切换器激活态下的键盘导航（方向键 / j,k,p,n / Esc），一律吞掉
