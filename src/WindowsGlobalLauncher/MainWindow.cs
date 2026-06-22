@@ -144,9 +144,6 @@ namespace CommandLauncher
         private readonly TextBlock _placeholder = CreatePlaceholder();
         private readonly ListBox _commandList = CreateCommandList();
 
-        // When true, HideWindow will keep the search text instead of clearing it
-        private bool _preserveSearchText = false;
-
         public MainWindow()
         {
             // 支持命令行指定配置文件路径
@@ -844,7 +841,6 @@ namespace CommandLauncher
         {
             try
             {
-                _preserveSearchText = !string.IsNullOrEmpty(_searchBox.Text);
                 ExecuteCommandImpl(selectedCommand);
                 AppState.Instance.RecordCommandExecution(selectedCommand.Name);
                 HideWindow();
@@ -922,6 +918,8 @@ namespace CommandLauncher
         private void HideWindow()
         {
             Hide();
+            _searchBox.Clear();
+            _placeholder.Visibility = Visibility.Visible;
         }
 
         private void ExitApplication()
