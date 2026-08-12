@@ -30,6 +30,7 @@ namespace CommandLauncher
                 ["VolumeUp"] = () => PressMediaKey(VK_VOLUME_UP),
                 ["VolumeDown"] = () => PressMediaKey(VK_VOLUME_DOWN),
                 ["ToggleMute"] = () => PressMediaKey(VK_VOLUME_MUTE),
+                ["ShowClipboardHistory"] = () => App.ClipboardHistoryWindow?.ShowHistory(),
             };
 
         /// <summary>

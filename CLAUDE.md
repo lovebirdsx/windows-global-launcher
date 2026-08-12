@@ -6,12 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含两个相互独立的功能：
+Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含三个相互独立的功能：
 
 1. **命令启动器**（`MainWindow`）：全局热键（默认 `Ctrl+Shift+I`）弹出的搜索式命令面板，从 JSON 配置读取命令并通过 `Process.Start` 执行。
 2. **Alt+Tab 窗口切换器**（`SwitcherWindow`）：接管系统 Alt+Tab，竖向列出当前窗口（图标 + 标题）供切换。
+3. **剪贴板历史**（`ClipboardWindow` + `ClipboardHistoryManager`）：后台记录系统复制历史（文本 + 图片），热键（默认 `Ctrl+Alt+C`）弹出紧凑历史面板，回车粘贴回原窗口。
 
-两者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出。
+三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出。
 
 ## 常用命令
 
@@ -53,8 +54,21 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - `SwitcherWindow.ReloadActionBindings` 负责装配（跳过 Enabled=false / 解析失败 / 未知动作名，记日志），并在 `ConfigUpdated` 时 `Dispatcher.Invoke` 热更新。
 - 修饰键**精确匹配**（配置 Alt+Q 时 Alt+Shift+Q 不触发）；命中即吞键。动作 Callback 必须轻量，实际执行统一包 `Dispatcher.BeginInvoke`（钩子回调有 `LowLevelHooksTimeout` 限制）。
 - **Win 组合键的开始菜单抑制**：主键被吞掉后系统只看到 Win 按下+松开，会弹出开始菜单；`KeyboardHook` 在命中 Win 绑定时注入无映射掩码键（`keybd_event(0xFF)`，同 AutoHotkey 的 mask key 做法）避免此问题。
-- 内置动作：`CloseWindow`（关闭前台窗口，复用 `WindowEnumerator.CloseWindow`）、`VolumeUp`/`VolumeDown`/`ToggleMute`（`keybd_event` 模拟媒体键 `VK_VOLUME_*`）。
-- 旧配置文件无 `WindowActions` 字段时 `LoadConfig` 自动补默认绑定（`AppConfig.DefaultWindowActions()`）；新增字段须同步 `AppConfig.SaveConfig` 手写 JSON 拼接。
+- 内置动作：`CloseWindow`（关闭前台窗口，复用 `WindowEnumerator.CloseWindow`）、`VolumeUp`/`VolumeDown`/`ToggleMute`（`keybd_event` 模拟媒体键 `VK_VOLUME_*`）、`ShowClipboardHistory`（唤出剪贴板历史，经 `App.ClipboardHistoryWindow` 静态属性找到窗口实例）。
+- 旧配置文件无 `WindowActions` 字段时 `LoadConfig` 自动补默认绑定（`AppConfig.DefaultWindowActions()`）；后续新增动作的默认绑定也要在 `LoadConfig` 里做「缺失则追加」的定向迁移（参照 ShowClipboardHistory 的写法），否则已有配置的老用户拿不到新热键。新增字段须同步 `AppConfig.SaveConfig` 手写 JSON 拼接。
+
+## 剪贴板历史实现要点
+
+涉及文件：`ClipboardHistoryManager.cs`、`ClipboardWindow.cs`、`ClipboardEntry.cs`。
+
+- **监听**：`AddClipboardFormatListener` + WinForms `NativeWindow` 消息窗口收 `WM_CLIPBOARDUPDATE`（同 `HotKeyListener` 的隐藏窗口做法，HwndSource 不支持 message-only parent）。读取剪贴板须在 UI（STA）线程，被占用时重试 5 次（每次间隔 30ms）。
+- **内容**：仅文本与图片。超长文本（>5 万字符）与超大图片（PNG >5MB）跳过。去重键：文本直接比较内容，图片比较 PNG 字节的 SHA1；命中已有条目则置顶并刷新时间（Ditto 风格），不重复写文件。粘贴回写剪贴板也会触发监听，靠去重自然收敛，无需抑制标记。
+- **持久化**：仿 `AppState` 单例模式，元数据写 `clipboard-history.json`（ UnsafeRelaxedJsonEscaping 保留中文），图片按条目 Id 存 `clipboard-images\{Id}.png`；上限 100 条（`MaxEntries`），淘汰/删除条目时连同 PNG 清理。加载时丢弃图片文件已丢失的条目。
+- **唤出与粘贴**：`ShowHistory` 在 `Show()` 前先 `GetForegroundWindow` 记下目标窗口；回车后先 `SetToClipboard` 写回内容，再 `WindowEnumerator.Activate` 恢复前台，延迟 120ms 后 `keybd_event` 模拟 Ctrl+V。
+- **弹出位置**：三级回退——`GetGUIThreadInfo` 取前台线程插入符矩形 + `ClientToScreen` 换算；VS Code 等 Electron/Chromium 应用光标自绘取不到，改用 UI Automation（`AutomationElement.FocusedElement` → `TextPattern` 选区的 `GetBoundingRectangles`）；再失败回退「鼠标所在屏幕居中」（同 `MainWindow.CenterWindowOnCurrentScreen`），并钳制在屏幕工作区内。
+- **前台激活**：热键经低级钩子到达（输入未真正进入本进程队列），直接 `Activate` 会被前台锁定间歇性拒绝，故 `ActivateSelf` 用 `AttachThreadInput` 附加到前台线程再 `SetForegroundWindow`（同 `WindowEnumerator.Activate` 技巧）。窗口默认 `ShowActivated`（需要焦点给搜索框），失焦即隐藏（同 `MainWindow`），与刻意不抢焦点的 `SwitcherWindow` 相反。
+- **交互**：与命令启动器一致（↑↓/Ctrl+P/Ctrl+N 移动、回车执行、Esc 取消），另支持 Delete 删除选中条目；再按一次热键关闭（切换式）。键盘处理在搜索框 `PreviewKeyDown`，不依赖全局钩子。
+- **图片预览**：选中图片条目时弹出独立预览窗（`_previewWindow`，`ShowActivated=false` 不抢焦点），位于主窗口右侧、放不下翻左侧，钳制在屏幕工作区内。尺寸尽量按原始像素显示，超过上限（720×560 与工作区 50%/60% 取较小）则等比缩小。原图经 `ClipboardHistoryManager.LoadFullImage` 加载并缓存在条目上（`ClipboardEntry.PreviewImage`）。注意 `RefreshList` 在 `Show()` 之前触发 `SelectionChanged` 时窗口尚不可见，`ShowHistory` 末尾需补调一次 `UpdatePreview()`。
 
 ## Alt+Tab 切换器实现要点
 
