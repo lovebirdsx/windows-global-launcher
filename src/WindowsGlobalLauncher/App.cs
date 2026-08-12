@@ -36,10 +36,15 @@ namespace CommandLauncher
             Logger.LogInfo("正在启动剪贴板历史监听");
             ClipboardHistoryManager.Instance.StartListening();
             ClipboardHistoryWindow = new ClipboardWindow();
+
+            // 恢复上次保存的护眼模式（内部会先还原单位矩阵，清理异常退出的颜色残留）
+            EyeCareManager.RestoreLastMode();
         }
 
         protected override void OnExit(ExitEventArgs e)
         {
+            // 还原全屏颜色矩阵，避免护眼效果在进程退出后残留
+            EyeCareManager.ResetEffect();
             _switcherWindow?.Dispose();
             ClipboardHistoryManager.Instance.Dispose();
             base.OnExit(e);

@@ -18,6 +18,8 @@ namespace CommandLauncher
         class State
         {
             public List<CommandExecuteInfo> CommandExecuteInfos { get; set; } = [];
+            // 当前护眼模式名（见 EyeCareManager.Modes），空串表示未设置
+            public string EyeCareMode { get; set; } = "";
         }
 
         static string AppStateFilePath
@@ -83,6 +85,17 @@ namespace CommandLauncher
         public int GetCommandExecuteCount(string name)
         {
             return _state.CommandExecuteInfos.FirstOrDefault(info => info.Name == name)?.ExecuteCount ?? 0;
+        }
+
+        public string GetEyeCareMode()
+        {
+            return _state.EyeCareMode;
+        }
+
+        public void SetEyeCareMode(string name)
+        {
+            _state.EyeCareMode = name;
+            SaveState();
         }
 
         public void RecordCommandExecution(string name)

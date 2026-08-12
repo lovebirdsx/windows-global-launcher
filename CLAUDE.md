@@ -6,13 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含三个相互独立的功能：
+Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含四个相互独立的功能：
 
 1. **命令启动器**（`MainWindow`）：全局热键（默认 `Ctrl+Shift+I`）弹出的搜索式命令面板，从 JSON 配置读取命令并通过 `Process.Start` 执行。
 2. **Alt+Tab 窗口切换器**（`SwitcherWindow`）：接管系统 Alt+Tab，竖向列出当前窗口（图标 + 标题）供切换。
 3. **剪贴板历史**（`ClipboardWindow` + `ClipboardHistoryManager`）：后台记录系统复制历史（文本 + 图片），热键（默认 `Ctrl+Alt+C`）弹出紧凑历史面板，回车粘贴回原窗口。
+4. **护眼模式**（`EyeCareManager`）：内置 7 种色温/亮度/反色/灰度模式，经命令启动器（搜「护眼」）或托盘菜单选择，通过 Magnification 全屏颜色矩阵生效。
 
-三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出。
+前三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出；护眼模式无独立窗口，启动时恢复上次选择。
 
 ## 常用命令
 
@@ -40,7 +41,7 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 
 **`AppConfig.SaveConfig` 是手写 JSON 字符串**（为了带注释），不是 `JsonSerializer` 输出。修改 `Config`/`ConfigCommand` 结构时必须同步更新这段手写拼接逻辑，否则保存的文件会与模型不一致。
 
-**内置命令**：`config` / `setconfig` / `logs` / `exit` 在 `MainWindow.RefreshCommandList` 中动态注入命令列表，由 `ExecuteAppCommand` 特殊处理，而非走 `Process.Start`。
+**内置命令**：`config` / `setconfig` / `logs` / `exit` 与护眼模式命令（`护眼：xxx`，来自 `EyeCareManager.Modes`）在 `MainWindow.RefreshCommandList` 中动态注入命令列表，由 `ExecuteAppCommand` 特殊处理，而非走 `Process.Start`。
 
 **子进程降权（普通用户权限启动）**：见 `MediumIntegrityProcess.cs`。launcher 自身以管理员运行，直接 `Process.Start` 出的子进程会继承管理员令牌。`MainWindow.ExecuteCommandImpl` 默认借用桌面 Shell（explorer.exe）令牌、通过 `MediumIntegrityProcess.Start`（`GetShellWindow` → 复制令牌 → `CreateProcessWithTokenW`）以中等完整性级别启动命令，等同用户桌面双击。`ConfigCommand`/`Command` 的 `RunAsAdmin` 字段（默认 `false`）控制：为 `true` 时走原 `Process.Start` 路径保留管理员权限。降权失败时抛异常 → 上层 `catch` 弹窗报错且不启动（不回退到管理员）。降权路径等价于 `UseShellExecute=false` 的直接 `CreateProcess`，不支持 URL/文档关联启动，也不做 stderr 重定向/退出码监听。新增/修改 `RunAsAdmin` 字段时记得同步 `AppConfig.SaveConfig` 的手写 JSON 拼接（布尔值要输出小写 `true`/`false`）。
 
@@ -68,7 +69,8 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - **弹出位置**：三级回退——`GetGUIThreadInfo` 取前台线程插入符矩形 + `ClientToScreen` 换算；VS Code 等 Electron/Chromium 应用光标自绘取不到，改用 UI Automation（`AutomationElement.FocusedElement` → `TextPattern` 选区的 `GetBoundingRectangles`）；再失败回退「鼠标所在屏幕居中」（同 `MainWindow.CenterWindowOnCurrentScreen`），并钳制在屏幕工作区内。
 - **前台激活**：热键经低级钩子到达（输入未真正进入本进程队列），直接 `Activate` 会被前台锁定间歇性拒绝，故 `ActivateSelf` 用 `AttachThreadInput` 附加到前台线程再 `SetForegroundWindow`（同 `WindowEnumerator.Activate` 技巧）。窗口默认 `ShowActivated`（需要焦点给搜索框），失焦即隐藏（同 `MainWindow`），与刻意不抢焦点的 `SwitcherWindow` 相反。
 - **交互**：与命令启动器一致（↑↓/Ctrl+P/Ctrl+N 移动、回车执行、Esc 取消），另支持 Delete 删除选中条目；再按一次热键关闭（切换式）。键盘处理在搜索框 `PreviewKeyDown`，不依赖全局钩子。
-- **图片预览**：选中图片条目时弹出独立预览窗（`_previewWindow`，`ShowActivated=false` 不抢焦点），位于主窗口右侧、放不下翻左侧，钳制在屏幕工作区内。尺寸尽量按原始像素显示，超过上限（720×560 与工作区 50%/60% 取较小）则等比缩小。原图经 `ClipboardHistoryManager.LoadFullImage` 加载并缓存在条目上（`ClipboardEntry.PreviewImage`）。注意 `RefreshList` 在 `Show()` 之前触发 `SelectionChanged` 时窗口尚不可见，`ShowHistory` 末尾需补调一次 `UpdatePreview()`。
+- **条目预览**：选中条目时弹出独立预览窗（`_previewWindow`，`ShowActivated=false` 不抢焦点），位于主窗口右侧、放不下翻左侧，钳制在屏幕工作区内（定位统一走 `PlacePreview`）。图片条目尽量按原始像素显示，超过上限（720×560 与工作区 50%/60% 取较小）则等比缩小，原图经 `ClipboardHistoryManager.LoadFullImage` 加载并缓存在条目上（`ClipboardEntry.PreviewImage`）；文本条目单行预览放不下（`Preview.Length > TextPreviewThreshold`）时显示折行完整文本（超长截断至 `TextPreviewMaxChars`，滚轮可滚动，滚动条刻意隐藏——点击会激活预览窗导致主窗口失焦关闭）。注意 `RefreshList` 在 `Show()` 之前触发 `SelectionChanged` 时窗口尚不可见，`ShowHistory` 末尾需补调一次 `UpdatePreview()`。
+- **列表滚动条**：刻意不显示——垂直 `Hidden`（保留滚动，键盘导航 `ScrollIntoView` 与滚轮仍可用），水平 `Disabled`（内容约束在列表宽度内，超长文本走省略号截断）。
 
 ## Alt+Tab 切换器实现要点
 
@@ -81,6 +83,16 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - **窗口激活的前台锁定**（`WindowEnumerator.Activate`）：用 `AttachThreadInput` 把 UI 线程临时附加到前台线程输入队列，再 `SetForegroundWindow`，否则键盘触发切换时会出现「任务栏闪烁但不前置」。兜底用 `SwitchToThisWindow`。
 - **键盘钩子与权限**：低级键盘钩子无法拦截发往「比自身完整性级别更高」进程的按键。以管理员运行的游戏（如 Unreal）会绕过钩子触发系统 Alt+Tab，故 `app.manifest` 设为 `requireAdministrator`。
 - `SwitcherWindow` 用 `ShowActivated=false` 故意**不抢焦点**，以保持目标窗口的前台历史、让 `SetForegroundWindow` 更可靠；因此键盘输入全程依赖全局钩子而非窗口焦点，`OnDeactivated` 也被刻意置空（不随失焦自动隐藏）。
+
+## 护眼模式实现要点
+
+涉及文件：`EyeCareManager.cs`、`MainWindow.cs`、`AppState.cs`、`App.cs`。
+
+- **实现通道是 Magnification 全屏颜色矩阵**（`MagSetFullscreenColorEffect`，5×5 行主序，输入向量 R,G,B,A,1），**不是** `SetDeviceGammaRamp`：传统 gamma API 在部分机器（HDR/新显卡驱动）上完全失效（实测设置/读取均返回失败），且反色/灰度效果 gamma ramp 无法表达。色温、亮度、反色、灰度四种效果统一用矩阵构造（`BuildMatrix`）。
+- **色温算法**：Tanner Helland 黑体近似（`KelvinToRgb`），按 6500K 归一化使 6500K = 恒等（不调节）。
+- **颜色效果跨进程残留**：程序退出后矩阵仍生效，因此 `App.OnStartup` 先还原再恢复上次模式（`RestoreLastMode`），`App.OnExit` 必调 `ResetEffect`。
+- **模式表内置固定**（参数对照 CareUEyes 官方文档，取日间值；官方 Editing=反色、Reading=灰度）：改模式改 `EyeCareManager.Modes` 一处即可，命令注入/托盘子菜单/持久化都自动跟随。
+- **交互**：与 `config` 等内置命令同机制——`RefreshCommandList` 注入「护眼：xxx」、`ExecuteAppCommand` 分发；托盘「护眼模式」子菜单在 `DropDownOpening` 时按 `EyeCareManager.CurrentModeName` 刷新勾选。当前模式名持久化在 `AppState`（`GetEyeCareMode`/`SetEyeCareMode`）。
 
 ## 日志
 

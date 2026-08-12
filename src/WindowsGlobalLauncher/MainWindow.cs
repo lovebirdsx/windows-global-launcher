@@ -421,6 +421,7 @@ namespace CommandLauncher
 
                 var contextMenu = new System.Windows.Forms.ContextMenuStrip();
                 contextMenu.Items.Add("显示", null, (s, e) => ShowWindow());
+                contextMenu.Items.Add(BuildEyeCareMenu());
                 contextMenu.Items.Add("设定配置文件", null, (s, e) => AppConfig.SetConfigFile());
                 contextMenu.Items.Add("打开配置文件", null, (s, e) => AppConfig.OpenConfigFile());
                 contextMenu.Items.Add("打开日志文件", null, (s, e) => Logger.OpenLogFile());
@@ -434,6 +435,38 @@ namespace CommandLauncher
             {
                 Logger.LogError("设置系统托盘图标失败", ex);
             }
+        }
+
+        /// <summary>构建托盘「护眼模式」子菜单（单选打勾，每次打开时同步当前模式）。</summary>
+        private static System.Windows.Forms.ToolStripMenuItem BuildEyeCareMenu()
+        {
+            var menu = new System.Windows.Forms.ToolStripMenuItem("护眼模式");
+            foreach (var mode in EyeCareManager.Modes)
+            {
+                var item = new System.Windows.Forms.ToolStripMenuItem(mode.Name) { Tag = mode };
+                item.Click += (s, e) =>
+                {
+                    try
+                    {
+                        EyeCareManager.ApplyMode(mode);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError($"应用护眼模式失败: {mode.Name}", ex);
+                        MessageBox.Show($"应用护眼模式失败: {ex.Message}");
+                    }
+                };
+                menu.DropDownItems.Add(item);
+            }
+            // 打开时刷新勾选项（命令面板执行的模式也能正确反映）
+            menu.DropDownOpening += (s, e) =>
+            {
+                foreach (System.Windows.Forms.ToolStripMenuItem item in menu.DropDownItems)
+                {
+                    item.Checked = item.Tag is EyeCareMode m && m.Name == EyeCareManager.CurrentModeName;
+                }
+            };
+            return menu;
         }
 
         private static System.Drawing.Icon CreateDefaultIcon()
@@ -586,6 +619,19 @@ namespace CommandLauncher
                 ExecuteCount = AppState.Instance.GetCommandExecuteCount("exit")
             });
 
+            // 注入护眼模式内置命令（护眼：xxx），由 ExecuteAppCommand 特殊处理
+            foreach (var mode in EyeCareManager.Modes)
+            {
+                commands.Add(new Command
+                {
+                    Name = mode.CommandName,
+                    Description = mode.Description,
+                    Shell = mode.CommandName,
+                    LastExecuted = AppState.Instance.GetCommandLastExecutedTime(mode.CommandName),
+                    ExecuteCount = AppState.Instance.GetCommandExecuteCount(mode.CommandName)
+                });
+            }
+
             if (!string.IsNullOrEmpty(filter))
             {
                 commands = commands.Where(c =>
@@ -737,6 +783,14 @@ namespace CommandLauncher
 
         private bool ExecuteAppCommand(Command selectedCommand)
         {
+            // 护眼模式命令（护眼：xxx）
+            var eyeCareMode = EyeCareManager.FindByCommandName(selectedCommand.Name);
+            if (eyeCareMode != null)
+            {
+                EyeCareManager.ApplyMode(eyeCareMode);
+                return true;
+            }
+
             if (AppCommands.Contains(selectedCommand.Name))
             {
                 if (selectedCommand.Name == "config")

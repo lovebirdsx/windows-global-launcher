@@ -79,10 +79,16 @@ namespace CommandLauncher
         private const double WindowHeight = 420;
         private const double RowHeight = 34;
 
-        // 图片预览窗的尺寸上限（同时受屏幕工作区比例限制，见 UpdatePreview）
+        // 图片预览窗的尺寸上限（同时受屏幕工作区比例限制，见 ShowImagePreview）
         private const double MaxPreviewWidth = 720;
         private const double MaxPreviewHeight = 560;
         private const double PreviewPadding = 18; // 边框 1 + 内边距 8，双侧
+
+        // 文本预览：预览文本折行后大致一行能放下的字符数，超过则在旁边弹完整文本预览
+        private const int TextPreviewThreshold = 55;
+        private const double TextPreviewWidth = 420;
+        // 超长文本（上限 5 万字符）截断预览，避免逐键移动选择时的换行布局卡顿
+        private const int TextPreviewMaxChars = 5000;
 
         private readonly ObservableCollection<ClipboardEntry> _items = [];
         private TextBox _searchBox = null!;
@@ -90,9 +96,11 @@ namespace CommandLauncher
         private TextBlock _emptyHint = null!;
         private readonly ListBox _list = CreateList();
 
-        // 图片预览窗：选中图片条目时跟随弹出，ShowActivated=false 不抢焦点
+        // 预览窗：选中条目时跟随弹出（图片显原图，长文本显完整内容），ShowActivated=false 不抢焦点
         private readonly Window _previewWindow;
         private readonly Image _previewImage;
+        private readonly TextBlock _previewText;
+        private readonly ScrollViewer _previewTextScroll;
 
         // 弹出前的前台窗口，回车后把焦点还给它再模拟 Ctrl+V
         private IntPtr _previousForeground;
@@ -101,8 +109,22 @@ namespace CommandLauncher
         {
             InitializeComponent();
 
-            // 图片预览窗：与主窗口同风格的无边框圆角窗，仅承载一张图
+            // 预览窗：与主窗口同风格的无边框圆角窗，按条目类型切换显示图片或文本
             _previewImage = new Image { Stretch = Stretch.Uniform };
+            _previewText = new TextBlock
+            {
+                FontSize = 13,
+                Foreground = Brushes.White,
+                TextWrapping = TextWrapping.Wrap,
+            };
+            // 滚动条刻意隐藏：点击滚动条会激活预览窗、导致主窗口失焦关闭，长文本用鼠标滚轮滚动即可
+            _previewTextScroll = new ScrollViewer
+            {
+                Content = _previewText,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Visibility = Visibility.Collapsed,
+            };
             _previewWindow = new Window
             {
                 WindowStyle = WindowStyle.None,
@@ -118,7 +140,7 @@ namespace CommandLauncher
                     BorderThickness = new Thickness(1),
                     CornerRadius = new CornerRadius(8),
                     Padding = new Thickness(8),
-                    Child = _previewImage,
+                    Child = new Grid { Children = { _previewImage, _previewTextScroll } },
                 },
             };
             _list.SelectionChanged += (s, e) => UpdatePreview();
@@ -237,7 +259,10 @@ namespace CommandLauncher
             template.VisualTree = dock;
             _list.ItemTemplate = template;
 
-            ScrollViewer.SetVerticalScrollBarVisibility(_list, ScrollBarVisibility.Auto);
+            // 隐藏滚动条：垂直保留滚动能力（键盘导航 ScrollIntoView / 鼠标滚轮需要）但不显示；
+        // 水平禁用，内容约束在列表宽度内，超长文本由省略号截断而不是撑出滚动条
+        ScrollViewer.SetVerticalScrollBarVisibility(_list, ScrollBarVisibility.Hidden);
+        ScrollViewer.SetHorizontalScrollBarVisibility(_list, ScrollBarVisibility.Disabled);
             _list.ItemsSource = _items;
             _list.MouseDoubleClick += (s, e) => PasteSelected();
 
@@ -334,15 +359,26 @@ namespace CommandLauncher
             _searchBox.Text = "";
         }
 
-        // 选中图片条目时，在主窗口右侧（放不下则左侧）弹出预览，尽量按原始尺寸显示
+        // 选中条目时在主窗口右侧（放不下则左侧）弹出预览：
+        // 图片条目尽量按原始尺寸显示原图；文本条目过长（单行预览被截断）时显示完整文本。
         private void UpdatePreview()
         {
-            if (!IsVisible || _list.SelectedItem is not ClipboardEntry entry || !entry.IsImage)
+            if (!IsVisible || _list.SelectedItem is not ClipboardEntry entry)
             {
                 _previewWindow.Hide();
                 return;
             }
 
+            if (entry.IsImage)
+                ShowImagePreview(entry);
+            else if (entry.Preview.Length > TextPreviewThreshold)
+                ShowTextPreview(entry);
+            else
+                _previewWindow.Hide();
+        }
+
+        private void ShowImagePreview(ClipboardEntry entry)
+        {
             var bmp = ClipboardHistoryManager.Instance.LoadFullImage(entry);
             if (bmp == null)
             {
@@ -351,30 +387,63 @@ namespace CommandLauncher
             }
             _previewImage.Source = bmp;
 
+            var wa = GetWorkAreaDip();
             var dpi = VisualTreeHelper.GetDpi(this);
-            int cx = (int)((Left + Width / 2) * dpi.DpiScaleX);
-            int cy = (int)((Top + Height / 2) * dpi.DpiScaleY);
-            var wa = System.Windows.Forms.Screen.FromPoint(new System.Drawing.Point(cx, cy)).WorkingArea;
-            double waLeft = wa.Left / dpi.DpiScaleX;
-            double waTop = wa.Top / dpi.DpiScaleY;
-            double waRight = wa.Right / dpi.DpiScaleX;
-            double waBottom = wa.Bottom / dpi.DpiScaleY;
 
             // 原始尺寸（物理像素 → DIP），超过上限则等比缩小；上限同时受屏幕工作区约束
             double w = bmp.PixelWidth / dpi.DpiScaleX;
             double h = bmp.PixelHeight / dpi.DpiScaleY;
-            double maxW = Math.Min(MaxPreviewWidth, (waRight - waLeft) * 0.5);
-            double maxH = Math.Min(MaxPreviewHeight, (waBottom - waTop) * 0.6);
+            double maxW = Math.Min(MaxPreviewWidth, wa.Width * 0.5);
+            double maxH = Math.Min(MaxPreviewHeight, wa.Height * 0.6);
             double scale = Math.Min(1.0, Math.Min(maxW / w, maxH / h));
 
-            _previewWindow.Width = Math.Max(w * scale, 1) + PreviewPadding;
-            _previewWindow.Height = Math.Max(h * scale, 1) + PreviewPadding;
+            _previewImage.Visibility = Visibility.Visible;
+            _previewTextScroll.Visibility = Visibility.Collapsed;
+
+            PlacePreview(Math.Max(w * scale, 1) + PreviewPadding, Math.Max(h * scale, 1) + PreviewPadding, wa);
+        }
+
+        private void ShowTextPreview(ClipboardEntry entry)
+        {
+            var wa = GetWorkAreaDip();
+            double textW = Math.Min(TextPreviewWidth, wa.Width * 0.5);
+            double maxH = Math.Min(MaxPreviewHeight, wa.Height * 0.6);
+
+            _previewText.Text = entry.Text.Length > TextPreviewMaxChars
+                ? entry.Text[..TextPreviewMaxChars] + "\n……"
+                : entry.Text;
+            _previewText.Measure(new Size(textW, double.PositiveInfinity));
+            double textH = Math.Min(Math.Max(_previewText.DesiredSize.Height, 20), maxH);
+
+            _previewImage.Visibility = Visibility.Collapsed;
+            _previewTextScroll.Visibility = Visibility.Visible;
+
+            PlacePreview(textW + PreviewPadding, textH + PreviewPadding, wa);
+        }
+
+        /// <summary>主窗口中心所在屏幕的工作区（DIP），用于预览窗的尺寸约束与定位。</summary>
+        private Rect GetWorkAreaDip()
+        {
+            var dpi = VisualTreeHelper.GetDpi(this);
+            int cx = (int)((Left + Width / 2) * dpi.DpiScaleX);
+            int cy = (int)((Top + Height / 2) * dpi.DpiScaleY);
+            var wa = System.Windows.Forms.Screen.FromPoint(new System.Drawing.Point(cx, cy)).WorkingArea;
+            return new Rect(
+                wa.Left / dpi.DpiScaleX, wa.Top / dpi.DpiScaleY,
+                (wa.Right - wa.Left) / dpi.DpiScaleX, (wa.Bottom - wa.Top) / dpi.DpiScaleY);
+        }
+
+        // 预览窗统一定位：主窗口右侧，放不下翻左侧，钳制在屏幕工作区内
+        private void PlacePreview(double width, double height, Rect wa)
+        {
+            _previewWindow.Width = width;
+            _previewWindow.Height = height;
 
             double previewLeft = Left + Width + 8;
-            if (previewLeft + _previewWindow.Width > waRight)
-                previewLeft = Left - _previewWindow.Width - 8; // 右侧放不下就翻到左侧
-            _previewWindow.Left = Math.Max(waLeft, previewLeft);
-            _previewWindow.Top = Math.Max(waTop, Math.Min(Top, waBottom - _previewWindow.Height));
+            if (previewLeft + width > wa.Right)
+                previewLeft = Left - width - 8; // 右侧放不下就翻到左侧
+            _previewWindow.Left = Math.Max(wa.Left, previewLeft);
+            _previewWindow.Top = Math.Max(wa.Top, Math.Min(Top, wa.Bottom - height));
 
             if (!_previewWindow.IsVisible)
                 _previewWindow.Show();
