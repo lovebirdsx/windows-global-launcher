@@ -20,6 +20,10 @@
 * `←`/`→` 方向键将选中窗口移到左侧/右侧显示器（已在最左/最右时无响应；最大化窗口移动后保持最大化）
 * 有未读通知的窗口（taskbar 按钮闪烁）会以琥珀橙背景高亮显示，切换到该窗口后高亮消除
 
+### 窗口动作热键
+
+全局生效的热键，作用于当前前台窗口，可在配置文件的 `WindowActions` 段自定义（默认 `Alt+Q` 关闭前台窗口，等同 `Alt+F4`）。修改配置后自动热更新。
+
 ## 运行
 
 * 要求 **.NET 8 运行时**
@@ -45,6 +49,13 @@
 {
   "MaxDisplayItems": 12,
   "HotKey": "Ctrl+Shift+I",
+  "WindowActions": [
+    {
+      "Action": "CloseWindow",
+      "HotKey": "Alt+Q",
+      "Enabled": true
+    }
+  ],
   "Commands": [
     {
       "Name": "记事本",
@@ -58,6 +69,8 @@
 ```
 
 > `RunAsAdmin` 可选,默认 `false`:命令以普通用户权限启动(借用桌面 Shell 令牌降权)。设为 `true` 则保留管理员权限启动。降权失败(如 explorer 未运行)时会报错且不启动该命令。
+
+> `WindowActions` 可选,缺省时补默认 `Alt+Q` 关闭前台窗口。`Action` 当前可用值:`CloseWindow`(关闭前台窗口,等同 `Alt+F4`);`Enabled` 设为 `false` 可临时停用某条绑定。修饰键为精确匹配(如配置 `Alt+Q` 时 `Alt+Shift+Q` 不会触发)。
 
 ## 开发
 

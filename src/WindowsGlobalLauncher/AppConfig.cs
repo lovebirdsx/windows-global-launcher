@@ -17,12 +17,21 @@ namespace CommandLauncher
         public bool RunAsAdmin { get; set; } = false;
     }
 
+    // 窗口动作热键配置：动作名（见 WindowActions 注册表）+ 热键字符串，全局生效
+    public class ConfigWindowAction
+    {
+        public string Action { get; set; } = "CloseWindow";
+        public string HotKey { get; set; } = "Alt+Q";
+        public bool Enabled { get; set; } = true;
+    }
+
     // 配置文件模型
     public class Config
     {
         public int MaxDisplayItems { get; set; } = 12;
         public string HotKey { get; set; } = AppConfig.DefaultHotKey;
         public List<ConfigCommand> Commands { get; set; } = [];
+        public List<ConfigWindowAction> WindowActions { get; set; } = [];
     }
 
     public class AppConfig
@@ -142,6 +151,9 @@ namespace CommandLauncher
                         AllowTrailingCommas = true
                     };
                     var config = JsonSerializer.Deserialize<Config>(json, options) ?? throw new JsonException("反序列化配置文件失败");
+                    // 向后兼容：旧配置文件没有 WindowActions 段时，补默认（Alt+Q 关闭前台窗口），行为不回归
+                    if (config.WindowActions == null || config.WindowActions.Count == 0)
+                        config.WindowActions = [new ConfigWindowAction()];
                     _config = config;
                     Logger.LogInfo($"成功加载配置文件，包含 {config.Commands.Count} 个命令");
                     
@@ -174,7 +186,8 @@ namespace CommandLauncher
                     new() { Name = "命令提示符", Description = "打开命令提示符", Shell = "cmd.exe" , HotKey = "" },
                     new() { Name = "画图", Description = "打开Windows画图程序", Shell = "mspaint.exe" , HotKey = "" },
                     new() { Name = "任务管理器", Description = "打开任务管理器", Shell = "taskmgr.exe" , HotKey = "" }
-                ]
+                ],
+                WindowActions = [new ConfigWindowAction()]
             };
             SaveConfig();
         }
@@ -266,6 +279,25 @@ namespace CommandLauncher
   // 全局热键配置 (支持: Ctrl, Alt, Shift, Win + 字母/数字/功能键)
   // 示例: ""Ctrl+Space"", ""Alt+R"", ""Win+L""
   ""HotKey"": """ + _config.HotKey + @""",
+  // 窗口动作热键（全局生效，作用于当前前台窗口）
+  // 可用 Action: ""CloseWindow""(关闭前台窗口，等同 Alt+F4)
+  ""WindowActions"": [";
+
+                for (int i = 0; i < _config.WindowActions.Count; i++)
+                {
+                    var action = _config.WindowActions[i];
+                    jsonWithComments += $@"
+    {{
+      ""Action"": ""{action.Action}"",
+      ""HotKey"": ""{action.HotKey}"",
+      ""Enabled"": {(action.Enabled ? "true" : "false")}
+    }}";
+                    if (i < _config.WindowActions.Count - 1)
+                        jsonWithComments += ",";
+                }
+
+                jsonWithComments += @"
+  ],
   // 命令列表 (每个命令可选配置 HotKey；RunAsAdmin=true 时以管理员权限启动，默认 false 为普通用户权限)
   ""Commands"": [";
 

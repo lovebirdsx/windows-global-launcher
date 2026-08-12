@@ -71,7 +71,48 @@ namespace CommandLauncher
             _hook.IsSwitcherActive = () => _isActive;
             _hook.Install();
 
+            // 装配可配置的窗口动作热键（如 Alt+Q 关闭前台窗口），并跟随配置热更新
+            ReloadActionBindings();
+            AppConfig.Instance.ConfigUpdated += () => Dispatcher.Invoke(ReloadActionBindings);
+
             Logger.LogInfo("Alt+Tab 切换器初始化完成");
+        }
+
+        /// <summary>
+        /// 从配置重建「热键 → 窗口动作」绑定表（启动时与配置热更新时调用，须在 UI 线程）。
+        /// 动作统一包一层 Dispatcher.BeginInvoke 异步执行，避免在钩子回调里阻塞（LowLevelHooksTimeout）。
+        /// </summary>
+        private void ReloadActionBindings()
+        {
+            var bindings = new List<HotKeyActionBinding>();
+            foreach (var item in AppConfig.Instance.Config.WindowActions)
+            {
+                if (!item.Enabled)
+                    continue;
+
+                if (!HotKeyParser.TryParse(item.HotKey, out int vk, out bool ctrl, out bool alt, out bool shift, out bool win))
+                {
+                    Logger.LogWarning($"窗口动作热键解析失败，已跳过: {item.HotKey}");
+                    continue;
+                }
+
+                if (!WindowActions.All.TryGetValue(item.Action, out var action))
+                {
+                    Logger.LogWarning($"未知窗口动作，已跳过: {item.Action}");
+                    continue;
+                }
+
+                bindings.Add(new HotKeyActionBinding
+                {
+                    VirtualKey = vk,
+                    Ctrl = ctrl,
+                    Alt = alt,
+                    Shift = shift,
+                    Win = win,
+                    Callback = () => Dispatcher.BeginInvoke(action)
+                });
+            }
+            _hook.SetActionBindings(bindings);
         }
 
         private static ListBox CreateList()

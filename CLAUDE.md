@@ -46,6 +46,13 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 **两套热键机制（不要混淆）**：
 - 命令启动器用 `HotKeyListener`（`user32.dll` 的 `RegisterHotKey` + 隐藏消息窗口接收 `WM_HOTKEY`）。注意系统占用的组合键（如 `Alt+Tab`）无法用 `RegisterHotKey` 注册。
 - 切换器用 `KeyboardHook`（`WH_KEYBOARD_LL` 低级键盘钩子），才能拦截并「吞掉」(`return (IntPtr)1`) 系统原生 Alt+Tab。
+- 热键字符串解析统一在 `HotKeyParser.TryParse`（纯静态函数，配套单测），`HotKeyListener` 与 `KeyboardHook` 的动作绑定都经由它解析，修改语法只需改这一处。
+
+**可配置窗口动作热键（如 Alt+Q 关闭前台窗口）**：表驱动结构，涉及 `HotKeyParser.cs`、`KeyboardHook.cs`（`HotKeyActionBinding` + `SetActionBindings`）、`WindowActions.cs`、`SwitcherWindow.cs`。
+- 配置文件 `WindowActions` 段（`ConfigWindowAction`：动作名 + 热键字符串 + Enabled）定义绑定；`WindowActions.All` 字典是动作名 → 实现的唯一注册点，**新增动作 = 字典加条目 + 配置文件加一行**。
+- `SwitcherWindow.ReloadActionBindings` 负责装配（跳过 Enabled=false / 解析失败 / 未知动作名，记日志），并在 `ConfigUpdated` 时 `Dispatcher.Invoke` 热更新。
+- 修饰键**精确匹配**（配置 Alt+Q 时 Alt+Shift+Q 不触发）；命中即吞键。动作 Callback 必须轻量，实际执行统一包 `Dispatcher.BeginInvoke`（钩子回调有 `LowLevelHooksTimeout` 限制）。
+- 旧配置文件无 `WindowActions` 字段时 `LoadConfig` 自动补默认（Alt+Q 关闭前台窗口）；新增字段须同步 `AppConfig.SaveConfig` 手写 JSON 拼接。
 
 ## Alt+Tab 切换器实现要点
 
