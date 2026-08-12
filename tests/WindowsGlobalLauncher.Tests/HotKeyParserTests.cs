@@ -66,4 +66,18 @@ namespace WindowsGlobalLauncher.Tests
             Assert.False(CreateAltQ().Matches(vk, ctrl, alt, shift, win));
         }
     }
+
+    public class WindowActionsTests
+    {
+        [Theory]
+        [InlineData("CloseWindow")]
+        [InlineData("VolumeUp")]
+        [InlineData("VolumeDown")]
+        [InlineData("ToggleMute")]
+        [InlineData("volumeup")] // 动作名不区分大小写
+        public void All_ContainsBuiltInActions(string actionName)
+        {
+            Assert.True(WindowActions.All.ContainsKey(actionName));
+        }
+    }
 }

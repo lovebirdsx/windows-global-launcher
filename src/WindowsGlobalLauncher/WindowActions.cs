@@ -14,11 +14,22 @@ namespace CommandLauncher
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
 
+        [DllImport("user32.dll")]
+        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        private const byte VK_VOLUME_MUTE = 0xAD;
+        private const byte VK_VOLUME_DOWN = 0xAE;
+        private const byte VK_VOLUME_UP = 0xAF;
+        private const uint KEYEVENTF_KEYUP = 0x0002;
+
         /// <summary>全部可用动作（动作名不区分大小写）。</summary>
         public static readonly IReadOnlyDictionary<string, Action> All =
             new Dictionary<string, Action>(StringComparer.OrdinalIgnoreCase)
             {
                 ["CloseWindow"] = CloseForegroundWindow,
+                ["VolumeUp"] = () => PressMediaKey(VK_VOLUME_UP),
+                ["VolumeDown"] = () => PressMediaKey(VK_VOLUME_DOWN),
+                ["ToggleMute"] = () => PressMediaKey(VK_VOLUME_MUTE),
             };
 
         /// <summary>
@@ -30,6 +41,13 @@ namespace CommandLauncher
             var hwnd = GetForegroundWindow();
             if (hwnd != IntPtr.Zero)
                 WindowEnumerator.CloseWindow(hwnd);
+        }
+
+        /// <summary>模拟一次多媒体键点击（增大/减小音量、静音），等同按键盘上的对应媒体键。</summary>
+        private static void PressMediaKey(byte vk)
+        {
+            keybd_event(vk, 0, 0, UIntPtr.Zero);
+            keybd_event(vk, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
     }
 }

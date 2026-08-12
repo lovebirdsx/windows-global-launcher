@@ -52,6 +52,14 @@ namespace CommandLauncher
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
 
+        [DllImport("user32.dll")]
+        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        private const uint KEYEVENTF_KEYUP = 0x0002;
+        // 未映射的虚拟键，用作掩码键：Win 组合键的主键被吞掉后，系统只看到 Win 按下+松开会弹出开始菜单，
+        // 注入一次该键让系统认为 Win 按住期间有其它按键发生（与 AutoHotkey 的 mask key 做法相同）。
+        private const byte VK_MASK = 0xFF;
+
         [StructLayout(LayoutKind.Sequential)]
         private struct KBDLLHOOKSTRUCT
         {
@@ -172,6 +180,8 @@ namespace CommandLauncher
                     {
                         if (binding.Matches(vk, ctrl, alt, shift, win))
                         {
+                            if (binding.Win)
+                                SendMaskKey();
                             binding.Callback();
                             return (IntPtr)1;
                         }
@@ -218,6 +228,13 @@ namespace CommandLauncher
         }
 
         private static bool IsKeyPressed(int vKey) => (GetAsyncKeyState(vKey) & 0x8000) != 0;
+
+        /// <summary>注入一次无映射的掩码键，避免 Win 组合键被吞后松开 Win 弹出开始菜单。</summary>
+        private static void SendMaskKey()
+        {
+            keybd_event(VK_MASK, 0, 0, UIntPtr.Zero);
+            keybd_event(VK_MASK, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        }
 
         public void Dispose()
         {
