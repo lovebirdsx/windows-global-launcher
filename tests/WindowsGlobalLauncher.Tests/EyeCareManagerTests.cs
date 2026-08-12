@@ -10,7 +10,7 @@ public class EyeCareManagerTests
     public void Modes_ContainsAllExpectedModes()
     {
         var names = EyeCareManager.Modes.Select(m => m.Name).ToList();
-        Assert.Equal(["正常", "智能", "办公", "游戏", "电影", "编辑", "阅读"], names);
+        Assert.Equal(["正常", "办公"], names);
     }
 
     [Fact]
@@ -76,36 +76,5 @@ public class EyeCareManagerTests
         Assert.Equal(1f, matrix[18]); // Alpha 通道保持恒等
         Assert.True(matrix[12] < matrix[6], "暖色温下蓝色增益应低于绿色");
         Assert.True(matrix[0] >= 0.9f, "红色增益接近亮度系数");
-    }
-
-    [Fact]
-    public void BuildMatrix_Invert_NegatesDiagonalWithOffset()
-    {
-        var mode = new EyeCareMode { Name = "测试", Description = "", Brightness = 0.85, Effect = EyeCareEffect.Invert };
-        var matrix = EyeCareManager.BuildMatrix(mode);
-        for (int i = 0; i < 3; i++)
-        {
-            Assert.Equal(-0.85f, matrix[i * 5 + i], 3);
-            Assert.Equal(0.85f, matrix[i * 5 + 4], 3);
-        }
-    }
-
-    [Fact]
-    public void BuildMatrix_Grayscale_SameLuminanceWeightsPerRow()
-    {
-        var mode = new EyeCareMode { Name = "测试", Description = "", ColorTempK = 6500, Brightness = 1.0, Effect = EyeCareEffect.Grayscale };
-        var matrix = EyeCareManager.BuildMatrix(mode);
-        // 6500K/亮度1时各通道增益相同 → 三行应完全相同（纯灰度）
-        for (int row = 0; row < 3; row++)
-        {
-            Assert.Equal(0.299f, matrix[row * 5 + 0], 3);
-            Assert.Equal(0.587f, matrix[row * 5 + 1], 3);
-            Assert.Equal(0.114f, matrix[row * 5 + 2], 3);
-        }
-        // 纯白输入映射回纯白：每行权重和为 1
-        for (int row = 0; row < 3; row++)
-        {
-            Assert.Equal(1f, matrix[row * 5] + matrix[row * 5 + 1] + matrix[row * 5 + 2], 3);
-        }
     }
 }

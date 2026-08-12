@@ -11,7 +11,7 @@ Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时�
 1. **命令启动器**（`MainWindow`）：全局热键（默认 `Ctrl+Shift+I`）弹出的搜索式命令面板，从 JSON 配置读取命令并通过 `Process.Start` 执行。
 2. **Alt+Tab 窗口切换器**（`SwitcherWindow`）：接管系统 Alt+Tab，竖向列出当前窗口（图标 + 标题）供切换。
 3. **剪贴板历史**（`ClipboardWindow` + `ClipboardHistoryManager`）：后台记录系统复制历史（文本 + 图片），热键（默认 `Ctrl+Alt+C`）弹出紧凑历史面板，回车粘贴回原窗口。
-4. **护眼模式**（`EyeCareManager`）：内置 7 种色温/亮度/反色/灰度模式，经命令启动器（搜「护眼」）或托盘菜单选择，通过 Magnification 全屏颜色矩阵生效。
+4. **护眼模式**（`EyeCareManager`）：内置「正常」「办公」两种色温/亮度模式，经命令启动器（搜「护眼」）或托盘菜单选择，通过 Magnification 全屏颜色矩阵生效。
 
 前三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出；护眼模式无独立窗口，启动时恢复上次选择。
 
@@ -88,10 +88,10 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 
 涉及文件：`EyeCareManager.cs`、`MainWindow.cs`、`AppState.cs`、`App.cs`。
 
-- **实现通道是 Magnification 全屏颜色矩阵**（`MagSetFullscreenColorEffect`，5×5 行主序，输入向量 R,G,B,A,1），**不是** `SetDeviceGammaRamp`：传统 gamma API 在部分机器（HDR/新显卡驱动）上完全失效（实测设置/读取均返回失败），且反色/灰度效果 gamma ramp 无法表达。色温、亮度、反色、灰度四种效果统一用矩阵构造（`BuildMatrix`）。
+- **实现通道是 Magnification 全屏颜色矩阵**（`MagSetFullscreenColorEffect`，5×5 行主序，输入向量 R,G,B,A,1），**不是** `SetDeviceGammaRamp`：传统 gamma API 在部分机器（HDR/新显卡驱动）上完全失效（实测设置/读取均返回失败）。色温 + 亮度效果统一用对角增益矩阵构造（`BuildMatrix`）。
 - **色温算法**：Tanner Helland 黑体近似（`KelvinToRgb`），按 6500K 归一化使 6500K = 恒等（不调节）。
 - **颜色效果跨进程残留**：程序退出后矩阵仍生效，因此 `App.OnStartup` 先还原再恢复上次模式（`RestoreLastMode`），`App.OnExit` 必调 `ResetEffect`。
-- **模式表内置固定**（参数对照 CareUEyes 官方文档，取日间值；官方 Editing=反色、Reading=灰度）：改模式改 `EyeCareManager.Modes` 一处即可，命令注入/托盘子菜单/持久化都自动跟随。
+- **模式表内置固定**（参数对照 CareUEyes 官方文档，取日间值；仅保留「正常」「办公」两种）：改模式改 `EyeCareManager.Modes` 一处即可，命令注入/托盘子菜单/持久化都自动跟随。旧版本持久化的已删除模式名（如「智能」）在 `RestoreLastMode` 中找不到对应模式，自然回退为不应用。
 - **交互**：与 `config` 等内置命令同机制——`RefreshCommandList` 注入「护眼：xxx」、`ExecuteAppCommand` 分发；托盘「护眼模式」子菜单在 `DropDownOpening` 时按 `EyeCareManager.CurrentModeName` 刷新勾选。当前模式名持久化在 `AppState`（`GetEyeCareMode`/`SetEyeCareMode`）。
 
 ## 日志

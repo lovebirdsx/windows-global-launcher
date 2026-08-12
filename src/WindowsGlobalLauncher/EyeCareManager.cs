@@ -5,21 +5,10 @@ using System.Runtime.InteropServices;
 
 namespace CommandLauncher
 {
-    /// <summary>护眼模式效果类型。</summary>
-    public enum EyeCareEffect
-    {
-        /// <summary>色温 + 亮度过滤（正常模式也走此类型，参数为 6500K/100% 即恒等）。</summary>
-        ColorFilter,
-        /// <summary>颜色反转（编辑模式），适合弱光环境。</summary>
-        Invert,
-        /// <summary>灰度（阅读模式），类墨水屏。</summary>
-        Grayscale,
-    }
-
     /// <summary>护眼模式定义。参数对照 CareUEyes 官方文档（取日间值）。</summary>
     public class EyeCareMode
     {
-        /// <summary>模式名（正常/智能/办公/游戏/电影/编辑/阅读）。</summary>
+        /// <summary>模式名（正常/办公）。</summary>
         public required string Name { get; init; }
         /// <summary>启动器命令名（护眼：xxx）。</summary>
         public string CommandName => EyeCareManager.CommandPrefix + Name;
@@ -29,15 +18,13 @@ namespace CommandLauncher
         public int ColorTempK { get; init; } = 6500;
         /// <summary>亮度系数，1.0 表示不降低。</summary>
         public double Brightness { get; init; } = 1.0;
-        public EyeCareEffect Effect { get; init; } = EyeCareEffect.ColorFilter;
     }
 
     /// <summary>
     /// 护眼模式管理：通过 Magnification API 的 MagSetFullscreenColorEffect 全屏颜色矩阵实现。
     /// 选此通道而非 SetDeviceGammaRamp 的原因：
     /// 1. 传统 gamma API 在部分机器（HDR/新驱动）上完全失效；
-    /// 2. 反色/灰度效果 gamma ramp 无法表达，颜色矩阵可以；
-    /// 3. CareUEyes 本身也加载 Magnification.dll 走同一通道。
+    /// 2. CareUEyes 本身也加载 Magnification.dll 走同一通道。
     /// 注意：该颜色效果在进程退出后仍残留在系统里，因此程序启动时先还原、退出时再还原。
     /// </summary>
     public static class EyeCareManager
@@ -48,20 +35,10 @@ namespace CommandLauncher
         /// <summary>内置模式表（对照 CareUEyes 官方文档，取日间值）。「正常」即还原。</summary>
         public static readonly IReadOnlyList<EyeCareMode> Modes =
         [
-            new() { Name = "正常", ColorTempK = 6500, Brightness = 1.00, Effect = EyeCareEffect.ColorFilter,
+            new() { Name = "正常", ColorTempK = 6500, Brightness = 1.00,
                     Description = "关闭护眼效果，准确色彩显示 (eye pause)" },
-            new() { Name = "智能", ColorTempK = 5000, Brightness = 0.90, Effect = EyeCareEffect.ColorFilter,
-                    Description = "色温 5000K，亮度 90%，最大蓝光过滤护眼 (eye health)" },
-            new() { Name = "办公", ColorTempK = 5500, Brightness = 0.85, Effect = EyeCareEffect.ColorFilter,
+            new() { Name = "办公", ColorTempK = 5500, Brightness = 0.85,
                     Description = "色温 5500K，亮度 85%，适合长时间办公 (eye office)" },
-            new() { Name = "游戏", ColorTempK = 6500, Brightness = 0.90, Effect = EyeCareEffect.ColorFilter,
-                    Description = "色温 6500K，亮度 90%，保持游戏画质 (eye game)" },
-            new() { Name = "电影", ColorTempK = 6000, Brightness = 0.90, Effect = EyeCareEffect.ColorFilter,
-                    Description = "色温 6000K，亮度 90%，优化观影体验 (eye movie)" },
-            new() { Name = "编辑", ColorTempK = 6500, Brightness = 0.85, Effect = EyeCareEffect.Invert,
-                    Description = "颜色反转，亮度 85%，适合弱光环境 (eye editing)" },
-            new() { Name = "阅读", ColorTempK = 5500, Brightness = 0.85, Effect = EyeCareEffect.Grayscale,
-                    Description = "灰度墨水屏，色温 5500K，亮度 85% (eye reading)" },
         ];
 
         private static bool _magInitialized;
@@ -87,7 +64,7 @@ namespace CommandLauncher
             ApplyMatrix(matrix);
             CurrentModeName = mode.Name;
             AppState.Instance.SetEyeCareMode(mode.Name);
-            Logger.LogInfo($"已应用护眼模式: {mode.Name} (色温 {mode.ColorTempK}K, 亮度 {mode.Brightness:P0}, 效果 {mode.Effect})");
+            Logger.LogInfo($"已应用护眼模式: {mode.Name} (色温 {mode.ColorTempK}K, 亮度 {mode.Brightness:P0})");
         }
 
         /// <summary>启动时调用：先还原单位矩阵（清理上次异常退出的残留），再恢复上次保存的模式。</summary>
@@ -144,51 +121,18 @@ namespace CommandLauncher
 
         /// <summary>
         /// 构造模式对应的 5×5 颜色矩阵（行主序，输入向量为 R,G,B,A,1）。
-        /// 色温/亮度：对角增益；反色：out = b*(1-in)；灰度：亮度加权后乘色温增益。
+        /// 色温/亮度过滤：对角增益（R,G,B 各自乘以色温增益 × 亮度系数）。
         /// </summary>
         public static float[] BuildMatrix(EyeCareMode mode)
         {
             var (r, g, b) = KelvinToRgb(mode.ColorTempK);
             float bright = (float)mode.Brightness;
-            float rf = (float)r, gf = (float)g, bf = (float)b;
 
-            switch (mode.Effect)
-            {
-                case EyeCareEffect.Invert:
-                {
-                    // out = bright * (1 - in)
-                    var m = BuildIdentity();
-                    for (int i = 0; i < 3; i++)
-                    {
-                        m[i * 5 + i] = -bright; // 对角取反
-                        m[i * 5 + 4] = bright;  // 平移 +bright
-                    }
-                    return m;
-                }
-                case EyeCareEffect.Grayscale:
-                {
-                    // 灰度 = 0.299R + 0.587G + 0.114B，再乘色温增益与亮度
-                    var m = BuildIdentity();
-                    float[] gains = [rf * bright, gf * bright, bf * bright];
-                    float[] lum = [0.299f, 0.587f, 0.114f];
-                    for (int row = 0; row < 3; row++)
-                    {
-                        for (int col = 0; col < 3; col++)
-                        {
-                            m[row * 5 + col] = lum[col] * gains[row];
-                        }
-                    }
-                    return m;
-                }
-                default: // ColorFilter
-                {
-                    var m = BuildIdentity();
-                    m[0] = rf * bright;
-                    m[6] = gf * bright;
-                    m[12] = bf * bright;
-                    return m;
-                }
-            }
+            var m = BuildIdentity();
+            m[0] = (float)r * bright;
+            m[6] = (float)g * bright;
+            m[12] = (float)b * bright;
+            return m;
         }
 
         /// <summary>
