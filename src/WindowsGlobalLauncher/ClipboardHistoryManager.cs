@@ -273,15 +273,21 @@ namespace CommandLauncher
             entry.Thumbnail = LoadBitmap(entry, decodePixelWidth: 52);
         }
 
-        /// <summary>加载图片条目的原图（缓存在条目上，供预览面板按原始尺寸显示）。</summary>
-        public BitmapImage? LoadFullImage(ClipboardEntry entry)
+        /// <summary>
+        /// 加载图片条目的预览图（缓存在条目上）。按预览允许的最大像素宽度降采样解码，
+        /// 避免接近 5MB 上限的大图在 UI 线程全量解码造成长阻塞；仅当原图更宽时才降采样。
+        /// 缓存时记录实际解码宽度，复用缓存时保证解码宽度不小于当前需求。
+        /// </summary>
+        public BitmapImage? LoadFullImage(ClipboardEntry entry, int maxPreviewPixelWidth)
         {
             if (!entry.IsImage)
                 return null;
-            if (entry.PreviewImage is BitmapImage cached)
+            // 已缓存且缓存解码宽度不小于当前需求，直接复用；否则按更大宽度重新解码
+            if (entry.PreviewImage is BitmapImage cached && entry.PreviewImageDecodedWidth >= maxPreviewPixelWidth)
                 return cached;
-            var bmp = LoadBitmap(entry, decodePixelWidth: 0);
+            var bmp = LoadBitmap(entry, maxPreviewPixelWidth);
             entry.PreviewImage = bmp;
+            entry.PreviewImageDecodedWidth = bmp?.PixelWidth ?? 0;
             return bmp;
         }
 
@@ -296,7 +302,8 @@ namespace CommandLauncher
                 bmp.BeginInit();
                 bmp.CacheOption = BitmapCacheOption.OnLoad; // 加载后即释放文件句柄
                 bmp.UriSource = new Uri(path);
-                if (decodePixelWidth > 0)
+                // 仅当原图更宽时才降采样解码，避免把小图放大失真
+                if (decodePixelWidth > 0 && entry.ImageWidth > decodePixelWidth)
                     bmp.DecodePixelWidth = decodePixelWidth;
                 bmp.EndInit();
                 bmp.Freeze();

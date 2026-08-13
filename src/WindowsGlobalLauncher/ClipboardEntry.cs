@@ -40,5 +40,9 @@ namespace CommandLauncher
         /// <summary>图片原图（预览面板用，按需加载并缓存，不持久化）。</summary>
         [JsonIgnore]
         public ImageSource? PreviewImage { get; set; }
+
+        /// <summary>预览图解码时的实际像素宽度（用于判断缓存是否满足当前预览需求，不持久化）。</summary>
+        [JsonIgnore]
+        public int PreviewImageDecodedWidth { get; set; }
     }
 }

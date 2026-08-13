@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Threading;
 
 namespace CommandLauncher
 {
@@ -18,6 +20,9 @@ namespace CommandLauncher
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            // 在最开始注册全局未处理异常处理器，确保初始化期间的异常也能被捕获并记录日志
+            RegisterGlobalExceptionHandlers();
+
             base.OnStartup(e);
 
             // 确保用户配置目录存在
@@ -48,6 +53,64 @@ namespace CommandLauncher
             _switcherWindow?.Dispose();
             ClipboardHistoryManager.Instance.Dispose();
             base.OnExit(e);
+        }
+
+        /// <summary>注册全局未处理异常处理器，统一写日志，避免异常静默丢失导致排查困难。</summary>
+        private static void RegisterGlobalExceptionHandlers()
+        {
+            // UI 线程（Dispatcher）未处理异常：记录后标记为已处理，让常驻托盘程序继续存活
+            App.Current.DispatcherUnhandledException += OnDispatcherUnhandledException;
+
+            // AppDomain 未处理异常（后台线程等）：无法阻止终止，仅记录日志
+            AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandledException;
+
+            // 未观察的 Task 异常：记录后标记为已观察，避免终结器触发时再次抛异常
+            TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+        }
+
+        /// <summary>UI 线程未处理异常：记录日志并标记为已处理，避免偶发异常直接杀掉常驻程序。</summary>
+        private static void OnDispatcherUnhandledException(object? sender, DispatcherUnhandledExceptionEventArgs e)
+        {
+            try
+            {
+                Logger.LogError("UI 线程未处理异常", e.Exception);
+            }
+            catch
+            {
+                // 忽略记录日志时自身抛出的错误，避免递归
+            }
+
+            e.Handled = true;
+        }
+
+        /// <summary>AppDomain 未处理异常：无法阻止进程终止，仅记录日志便于排查。</summary>
+        private static void OnAppDomainUnhandledException(object? sender, UnhandledExceptionEventArgs e)
+        {
+            try
+            {
+                var exception = e.ExceptionObject as Exception
+                                ?? new Exception($"非 Exception 类型的异常对象: {e.ExceptionObject ?? "null"}");
+                Logger.LogError($"AppDomain 未处理异常 (IsTerminating={e.IsTerminating})", exception);
+            }
+            catch
+            {
+                // 忽略记录日志时自身抛出的错误，避免递归
+            }
+        }
+
+        /// <summary>未观察的 Task 异常：记录日志并标记为已观察。</summary>
+        private static void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
+        {
+            try
+            {
+                Logger.LogError("未观察的 Task 异常", e.Exception);
+            }
+            catch
+            {
+                // 忽略记录日志时自身抛出的错误，避免递归
+            }
+
+            e.SetObserved();
         }
     }
 }

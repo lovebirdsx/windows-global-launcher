@@ -69,7 +69,7 @@ namespace CommandLauncher
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam,
             IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
 
@@ -98,6 +98,9 @@ namespace CommandLauncher
         private const int GCLP_HICONSM = -34;
         private const uint SMTO_ABORTIFHUNG = 0x0002;
         private const uint WM_CLOSE = 0x0010;
+        private const uint WM_NULL = 0x0000;
+        private const int ERROR_TIMEOUT = 1460; // SendMessageTimeout 超时时的 GetLastError 值
+        private const uint HungProbeTimeoutMs = 200;
 
         private const int DWMWA_CLOAKED = 14;
 
@@ -160,6 +163,8 @@ namespace CommandLauncher
         /// 激活（切换到）指定窗口。
         /// 通过 AttachThreadInput 把当前线程附加到前台线程的输入队列，绕过 Windows 前台锁定，
         /// 解决键盘触发切换时仅任务栏闪烁、窗口不前置的问题。
+        /// 附加前先探测目标窗口线程是否挂起：若挂起，共享输入队列会把本线程一起拖死（无异常、只能强杀），
+        /// 此时跳过附加，改走不附加的兜底路径（SetForegroundWindow + SwitchToThisWindow）。
         /// </summary>
         public static void Activate(IntPtr hwnd)
         {
@@ -176,21 +181,32 @@ namespace CommandLauncher
                 uint foreThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out _);
                 uint targetThread = GetWindowThreadProcessId(hwnd, out _);
 
+                bool foreHung = IsWindowHung(foreground);
+                bool targetHung = IsWindowHung(hwnd);
+
                 bool attachedFore = false;
                 bool attachedTarget = false;
-                if (foreThread != 0 && foreThread != thisThread)
-                    attachedFore = AttachThreadInput(thisThread, foreThread, true);
-                if (targetThread != 0 && targetThread != thisThread && targetThread != foreThread)
-                    attachedTarget = AttachThreadInput(thisThread, targetThread, true);
+                try
+                {
+                    if (!foreHung && foreThread != 0 && foreThread != thisThread)
+                        attachedFore = AttachThreadInput(thisThread, foreThread, true);
+                    if (!targetHung && targetThread != 0 && targetThread != thisThread && targetThread != foreThread)
+                        attachedTarget = AttachThreadInput(thisThread, targetThread, true);
 
-                BringWindowToTop(hwnd);
-                SetForegroundWindow(hwnd);
-                ShowWindow(hwnd, SW_SHOW);
+                    if (foreHung || targetHung)
+                        Logger.LogWarning($"跳过 AttachThreadInput：目标窗口无响应（前台 {foreground} 挂起={foreHung}，目标 {hwnd} 挂起={targetHung}），改用兜底激活路径");
 
-                if (attachedFore)
-                    AttachThreadInput(thisThread, foreThread, false);
-                if (attachedTarget)
-                    AttachThreadInput(thisThread, targetThread, false);
+                    BringWindowToTop(hwnd);
+                    SetForegroundWindow(hwnd);
+                    ShowWindow(hwnd, SW_SHOW);
+                }
+                finally
+                {
+                    if (attachedFore)
+                        AttachThreadInput(thisThread, foreThread, false);
+                    if (attachedTarget)
+                        AttachThreadInput(thisThread, targetThread, false);
+                }
 
                 // 兜底：仍未到前台时，使用 Alt+Tab 内部 API
                 if (GetForegroundWindow() != hwnd)
@@ -200,6 +216,23 @@ namespace CommandLauncher
             {
                 Logger.LogError($"激活窗口失败: {hwnd}", ex);
             }
+        }
+
+        /// <summary>
+        /// 探测窗口是否无响应（挂起）。WM_NULL 的返回值恒为 0，无法用返回值区分成功与超时，
+        /// 故用 SetLastError + GetLastError == ERROR_TIMEOUT 判定超时；SMTO_ABORTIFHUNG 确保
+        /// 目标挂起时尽快返回，最坏情况只阻塞 HungProbeTimeoutMs 毫秒。
+        /// </summary>
+        private static bool IsWindowHung(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero)
+                return false;
+
+            IntPtr result = SendMessageTimeout(hwnd, WM_NULL, IntPtr.Zero, IntPtr.Zero,
+                SMTO_ABORTIFHUNG, HungProbeTimeoutMs, out _);
+            if (result != IntPtr.Zero)
+                return false; // 消息被处理且返回非零 → 目标响应正常
+            return Marshal.GetLastWin32Error() == ERROR_TIMEOUT;
         }
 
         /// <summary>

@@ -66,10 +66,10 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - **内容**：仅文本与图片。超长文本（>5 万字符）与超大图片（PNG >5MB）跳过。去重键：文本直接比较内容，图片比较 PNG 字节的 SHA1；命中已有条目则置顶并刷新时间（Ditto 风格），不重复写文件。粘贴回写剪贴板也会触发监听，靠去重自然收敛，无需抑制标记。
 - **持久化**：仿 `AppState` 单例模式，元数据写 `clipboard-history.json`（ UnsafeRelaxedJsonEscaping 保留中文），图片按条目 Id 存 `clipboard-images\{Id}.png`；上限 100 条（`MaxEntries`），淘汰/删除条目时连同 PNG 清理。加载时丢弃图片文件已丢失的条目。
 - **唤出与粘贴**：`ShowHistory` 在 `Show()` 前先 `GetForegroundWindow` 记下目标窗口；回车后先 `SetToClipboard` 写回内容，再 `WindowEnumerator.Activate` 恢复前台，延迟 120ms 后 `keybd_event` 模拟 Ctrl+V。
-- **弹出位置**：三级回退——`GetGUIThreadInfo` 取前台线程插入符矩形 + `ClientToScreen` 换算；VS Code 等 Electron/Chromium 应用光标自绘取不到，改用 UI Automation（`AutomationElement.FocusedElement` → `TextPattern` 选区的 `GetBoundingRectangles`）；再失败回退「鼠标所在屏幕居中」（同 `MainWindow.CenterWindowOnCurrentScreen`），并钳制在屏幕工作区内。
-- **前台激活**：热键经低级钩子到达（输入未真正进入本进程队列，且经 `Dispatcher.BeginInvoke` 异步执行），直接 `Activate`/`SetForegroundWindow` 会被前台锁定间歇性拒绝（非文本输入框时 `PositionWindow` 的 UI Automation 首次调用很慢、进一步拖到锁定武装之后），导致第一次唤出一闪即隐。因此窗口改为 `ShowActivated=false` 不抢焦点，激活统一走 `TryActivateOnce`：用弹出前记录的 `_previousForeground` 取线程 `AttachThreadInput` 附加（同 `WindowEnumerator.Activate` 技巧）→ `BringWindowToTop` → `SetForegroundWindow`，失败时模拟一次 Alt 击发解锁再重试，仍未果则经 `DispatcherTimer` 短间隔重试（上限 `MaxActivationRetries`）。失焦即隐藏（同 `MainWindow`），但显示后有 `ActivationGraceMs` 宽限期，此间失焦视为激活抖动、重试激活而非隐藏。
+- **弹出位置**：三级回退——`GetGUIThreadInfo` 取前台线程插入符矩形 + `ClientToScreen` 换算；VS Code 等 Electron/Chromium 应用光标自绘取不到，改用 UI Automation（`AutomationElement.FocusedElement` → `TextPattern` 选区的 `GetBoundingRectangles`）；再失败回退「鼠标所在屏幕居中」（同 `MainWindow.CenterWindowOnCurrentScreen`），并钳制在屏幕工作区内。UIA 是跨进程 COM 调用、无超时，目标应用（VS Code 等 Electron）卡顿时会长时间阻塞 UI 线程，故 `TryGetCaretViaUIA` 改为 `Task.Run` 后台执行 + `Wait(300ms)`（常量 `UiaTimeoutMs`）短超时，超时/失败静默回退居中定位并记 WARN；只把 `Point?` 纯数据传回 UI 线程，`AutomationElement` 等 COM 对象留在后台线程。
+- **前台激活**：热键经低级钩子到达（输入未真正进入本进程队列，且经 `Dispatcher.BeginInvoke` 异步执行），直接 `Activate`/`SetForegroundWindow` 会被前台锁定间歇性拒绝（非文本输入框时 `PositionWindow` 的 UI Automation 首次调用很慢、进一步拖到锁定武装之后），导致第一次唤出一闪即隐。因此窗口改为 `ShowActivated=false` 不抢焦点，激活统一走 `TryActivateOnce`：用弹出前记录的 `_previousForeground` 取线程 `AttachThreadInput` 附加（同 `WindowEnumerator.Activate` 技巧）→ `BringWindowToTop` → `SetForegroundWindow`，失败时模拟一次 Alt 击发解锁再重试，仍未果则经 `DispatcherTimer` 短间隔重试（上限 `MaxActivationRetries`）。附加前同样先 `IsWindowHung` 探测弹出前前台窗口线程是否挂起，挂起则跳过 attach、改走 `SwitchToThisWindow` 兜底（避免共享输入队列把 UI 线程一起拖死，见切换器小节）；attach/detach 严格 `try/finally` 配对，异常路径也保证解除附加。失焦即隐藏（同 `MainWindow`），但显示后有 `ActivationGraceMs` 宽限期，此间失焦视为激活抖动、重试激活而非隐藏。
 - **交互**：与命令启动器一致（↑↓/Ctrl+P/Ctrl+N 移动、回车执行、Esc 取消），另支持 Delete 删除选中条目；再按一次热键关闭（切换式）。键盘处理在搜索框 `PreviewKeyDown`，不依赖全局钩子。
-- **条目预览**：选中条目时弹出独立预览窗（`_previewWindow`，`ShowActivated=false` 不抢焦点），位于主窗口右侧、放不下翻左侧，钳制在屏幕工作区内（定位统一走 `PlacePreview`）。图片条目尽量按原始像素显示，超过上限（720×560 与工作区 50%/60% 取较小）则等比缩小，原图经 `ClipboardHistoryManager.LoadFullImage` 加载并缓存在条目上（`ClipboardEntry.PreviewImage`）；文本条目单行预览放不下（`Preview.Length > TextPreviewThreshold`）时显示折行完整文本（超长截断至 `TextPreviewMaxChars`，滚轮可滚动，滚动条刻意隐藏——点击会激活预览窗导致主窗口失焦关闭）。注意 `RefreshList` 在 `Show()` 之前触发 `SelectionChanged` 时窗口尚不可见，`ShowHistory` 末尾需补调一次 `UpdatePreview()`。
+- **条目预览**：选中条目时弹出独立预览窗（`_previewWindow`，`ShowActivated=false` 不抢焦点），位于主窗口右侧、放不下翻左侧，钳制在屏幕工作区内（定位统一走 `PlacePreview`）。图片条目尽量按原始像素显示，超过上限（720×560 与工作区 50%/60% 取较小）则等比缩小，预览图经 `ClipboardHistoryManager.LoadFullImage` 加载并缓存在条目上（`ClipboardEntry.PreviewImage`）。`ShowImagePreview` 先按预览上限（含 DPI 换算）算出 `maxPixelWidth` 传给 `LoadFullImage`，`LoadBitmap` 仅在原图更宽时才设 `DecodePixelWidth`（只降不升），避免接近 5MB 上限的大图在 UI 线程全量解码造成长阻塞；`ClipboardEntry.PreviewImageDecodedWidth`（`JsonIgnore`）记录实际解码宽度，复用缓存要求缓存宽度 ≥ 当前需求、否则按更大宽度重解码。`SetToClipboard`（全尺寸）与列表缩略图（52px）语义不变；文本条目单行预览放不下（`Preview.Length > TextPreviewThreshold`）时显示折行完整文本（超长截断至 `TextPreviewMaxChars`，滚轮可滚动，滚动条刻意隐藏——点击会激活预览窗导致主窗口失焦关闭）。注意 `RefreshList` 在 `Show()` 之前触发 `SelectionChanged` 时窗口尚不可见，`ShowHistory` 末尾需补调一次 `UpdatePreview()`。
 - **列表滚动条**：刻意不显示——垂直 `Hidden`（保留滚动，键盘导航 `ScrollIntoView` 与滚轮仍可用），水平 `Disabled`（内容约束在列表宽度内，超长文本走省略号截断）。
 
 ## Alt+Tab 切换器实现要点
@@ -81,6 +81,7 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - **窗口过滤**（`WindowEnumerator.IsAltTabWindow`）：可见、有标题、非 `WS_EX_TOOLWINDOW`、顶层（无 owner 或 `WS_EX_APPWINDOW`）、排除 DWM cloaked 的后台 UWP、排除切换器自身。`EnumWindows` 返回 Z 序（≈MRU），默认选中第二项（上一个窗口）。
 - **图标提取**优先级：`WM_GETICON` → 类图标 `GCLP_HICON` → 进程 exe 的 `ExtractAssociatedIcon`（仅最后一种按 exe 路径缓存；前两种句柄归窗口/类所有，不可销毁）。
 - **窗口激活的前台锁定**（`WindowEnumerator.Activate`）：用 `AttachThreadInput` 把 UI 线程临时附加到前台线程输入队列，再 `SetForegroundWindow`，否则键盘触发切换时会出现「任务栏闪烁但不前置」。兜底用 `SwitchToThisWindow`。
+- **附加前先探测目标线程是否挂起（`IsWindowHung`）**：`AttachThreadInput` 是共享输入队列，若目标窗口无响应（例如刚被 `CloseWindow` 动作请求关闭、正在退出或已挂起），附加会把本线程一起拖死——无异常、无日志、只能强杀；且低级键盘钩子装在同一 UI 线程，UI 线程挂死后所有热键全部失效。故附加前用 `SendMessageTimeout` 发 `WM_NULL` + `SMTO_ABORTIFHUNG`（200ms 超时）探测；`WM_NULL` 返回值恒为 0，无法用返回值区分成功与超时，须给 P/Invoke 声明加 `SetLastError = true`、用 `Marshal.GetLastWin32Error() == ERROR_TIMEOUT`(1460) 判定。探测到挂起就跳过 attach、改走不附加兜底（`SetForegroundWindow` + `SwitchToThisWindow`）并记 WARN。attach/detach 严格 `try/finally` 配对，异常路径也保证解除附加（原先 detach 在 try 内，异常会让线程永久处于 attached 状态）。
 - **键盘钩子与权限**：低级键盘钩子无法拦截发往「比自身完整性级别更高」进程的按键。以管理员运行的游戏（如 Unreal）会绕过钩子触发系统 Alt+Tab，故 `app.manifest` 设为 `requireAdministrator`。
 - `SwitcherWindow` 用 `ShowActivated=false` 故意**不抢焦点**，以保持目标窗口的前台历史、让 `SetForegroundWindow` 更可靠；因此键盘输入全程依赖全局钩子而非窗口焦点，`OnDeactivated` 也被刻意置空（不随失焦自动隐藏）。
 
@@ -97,6 +98,10 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 ## 日志
 
 `Logger` 写入 `App.BaseDir` 下按日期轮转的日志（自动清理 3 天前），可通过托盘菜单或内置 `logs` 命令打开。排查运行期问题优先看日志。
+
+**全局未处理异常兜底**（`App.OnStartup` 最开头调用 `RegisterGlobalExceptionHandlers`）：注册三类处理器统一记 ERROR 日志，避免异常静默丢失——`DispatcherUnhandledException`（记 ERROR 后 `e.Handled = true`，让常驻托盘程序继续存活）、`AppDomain.CurrentDomain.UnhandledException`（记 ERROR 并附 `IsTerminating`，无法阻止终止）、`TaskScheduler.UnobservedTaskException`（记 ERROR 后 `SetObserved()`）。处理器内写日志代码自身用 try/catch 包住防递归。原先只有 `Program.Main` 对 `app.Run()` 的 try/catch 兜底，Dispatcher 回调 / 后台线程 / 未观察 Task 的异常不留日志、排查困难。
+
+**关键路径日志约定**：`ShowHistory` 记 INFO「弹出前前台窗口」、首次激活失败记 WARN「开始短间隔重试」（每次唤出最多一条）、跳过 attach / UIA 超时或失败均记 WARN；刻意避开 `SelectionChanged` 等高频路径以免刷屏。
 
 ## 其它
 
