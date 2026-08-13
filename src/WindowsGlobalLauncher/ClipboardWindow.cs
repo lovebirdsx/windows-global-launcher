@@ -9,6 +9,7 @@ using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace CommandLauncher
 {
@@ -70,6 +71,7 @@ namespace CommandLauncher
         }
 
         private const byte VK_CONTROL = 0x11;
+        private const byte VK_MENU = 0x12;   // Alt
         private const byte VK_V = 0x56;
         private const uint KEYEVENTF_KEYUP = 0x0002;
 
@@ -104,6 +106,16 @@ namespace CommandLauncher
 
         // 弹出前的前台窗口，回车后把焦点还给它再模拟 Ctrl+V
         private IntPtr _previousForeground;
+
+        // 显示后的激活宽限期（毫秒）：此间失焦多为激活序列的瞬时抖动（VS Code 短暂夺回前台），
+        // 重试激活而非隐藏，避免第一次唤出「一闪即隐」；宽限期过后恢复「失焦即隐藏」。
+        private const int ActivationGraceMs = 600;
+        private const int ActivationRetryIntervalMs = 50;
+        private const int MaxActivationRetries = 8;
+
+        private long _graceUntil; // Environment.TickCount64 标记的宽限期截止时刻
+        private readonly DispatcherTimer _activationTimer; // 激活失败时短间隔重试
+        private int _activationRetries;
 
         public ClipboardWindow()
         {
@@ -145,6 +157,10 @@ namespace CommandLauncher
             };
             _list.SelectionChanged += (s, e) => UpdatePreview();
 
+            // 激活失败时的重试定时器（短间隔，配合前台锁定解除）
+            _activationTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ActivationRetryIntervalMs) };
+            _activationTimer.Tick += (s, e) => TryActivateOnce();
+
             // 提前创建句柄，保证未显示时也能取到 DPI 做坐标换算
             new WindowInteropHelper(this).EnsureHandle();
 
@@ -178,6 +194,7 @@ namespace CommandLauncher
             Background = Brushes.Transparent; // 背景与描边/圆角统一由外层 Border 承载
             Topmost = true;
             ShowInTaskbar = false;
+            ShowActivated = false; // 不抢焦点，激活统一由 TryActivateOnce 走 AttachThreadInput + 前台解锁，避免 Show 的半激活抖动
 
             // 搜索框 + 占位提示（与命令启动器同风格，尺寸更紧凑）
             _searchBox = new TextBox
@@ -315,30 +332,43 @@ namespace CommandLauncher
             RefreshList();
             PositionWindow();
 
-            Show();
-            ActivateSelf();
+            Show(); // ShowActivated=false，仅显示不激活；激活统一交给 TryActivateOnce（前台解锁 + 重试）
+            _graceUntil = Environment.TickCount64 + ActivationGraceMs;
+            _activationRetries = 0;
+            TryActivateOnce();
             UpdatePreview(); // RefreshList 发生在 Show 之前，SelectionChanged 时被 IsVisible 挡住，这里补一次
         }
 
         // 热键经低级键盘钩子到达，输入并未真正进入本进程的消息队列，
         // 直接 Activate/SetForegroundWindow 会被前台锁定间歇性拒绝（表现为窗口弹出但无焦点）。
-        // 复用 WindowEnumerator.Activate 的 AttachThreadInput 技巧绕过前台锁定。
-        private void ActivateSelf()
+        // 复用 WindowEnumerator.Activate 的 AttachThreadInput 技巧绕过前台锁定；失败时用 Alt 击发解锁并短间隔重试。
+        private void TryActivateOnce()
         {
+            if (!IsVisible)
+                return; // 已隐藏则不再激活
+
+            bool ok = false;
             try
             {
                 var hwnd = new WindowInteropHelper(this).Handle;
-                var foreground = GetForegroundWindow();
-
                 uint thisThread = GetCurrentThreadId();
-                uint foreThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out _);
+                // 用弹出前记录的前台窗口取线程附加（而非 Show 之后的 GetForegroundWindow，避免被自身干扰导致附加错线程）
+                uint foreThread = _previousForeground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(_previousForeground, out _);
 
                 bool attached = false;
                 if (foreThread != 0 && foreThread != thisThread)
                     attached = AttachThreadInput(thisThread, foreThread, true);
 
                 BringWindowToTop(hwnd);
-                SetForegroundWindow(hwnd);
+                ok = SetForegroundWindow(hwnd);
+
+                // 前台锁定仍拒绝时：模拟一次 Alt 击发解锁（经典 SetForegroundWindow 解锁手段），再重试一次
+                if (!ok)
+                {
+                    keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
+                    keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    ok = SetForegroundWindow(hwnd);
+                }
 
                 if (attached)
                     AttachThreadInput(thisThread, foreThread, false);
@@ -350,10 +380,28 @@ namespace CommandLauncher
 
             Activate(); // WPF 层同步激活态
             Keyboard.Focus(_searchBox);
+
+            _activationRetries++;
+            if (ok)
+            {
+                _activationTimer.Stop(); // 激活成功即停止重试，避免定时器持续触发
+            }
+            else if (_activationRetries < MaxActivationRetries)
+            {
+                // 短间隔后重试，等待前台锁定解除
+                _activationTimer.Stop();
+                _activationTimer.Start();
+            }
+            else
+            {
+                _activationTimer.Stop();
+                Logger.LogWarning("剪贴板窗口多次激活失败，窗口可能未获得焦点");
+            }
         }
 
         private void HideWindow()
         {
+            _activationTimer.Stop();
             Hide();
             _previewWindow.Hide();
             _searchBox.Text = "";
@@ -667,12 +715,22 @@ namespace CommandLauncher
 
         #endregion
 
-        // 失焦即取消（与命令启动器一致）
+        // 失焦即取消（与命令启动器一致）。但显示后的宽限期内，失焦多为激活序列的瞬时抖动
+        // （前台被 VS Code 短暂夺回），此时重试激活而非隐藏，避免第一次唤出一闪即隐。
         protected override void OnDeactivated(EventArgs e)
         {
             base.OnDeactivated(e);
-            if (IsVisible)
-                HideWindow();
+
+            if (!IsVisible)
+                return;
+
+            if (Environment.TickCount64 < _graceUntil)
+            {
+                TryActivateOnce();
+                return;
+            }
+
+            HideWindow();
         }
 
         /// <summary>相对时间显示：刚刚 / n 分钟前 / n 小时前 / 昨天 HH:mm / MM-dd HH:mm。</summary>
