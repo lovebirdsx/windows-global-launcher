@@ -44,12 +44,45 @@ namespace CommandLauncher
 
             // 恢复上次保存的护眼模式（内部会先还原单位矩阵，清理异常退出的颜色残留）
             EyeCareManager.RestoreLastMode();
+
+            // 启动自动后台下载增强 OCR 引擎（fire-and-forget，合流，不打扰不弹窗）
+            if (!RapidOcrBackend.IsInstalled)
+            {
+                _ = DownloadOcrEngineAsync();
+
+                async Task DownloadOcrEngineAsync()
+                {
+                    try
+                    {
+                        bool ok = await OcrEngineInstaller.EnsureInstalledAsync();
+                        if (ok)
+                            Logger.LogInfo("识图引擎后台下载完成");
+                        else
+                            Logger.LogWarning("识图引擎后台下载失败（安装器已记详细日志）");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogWarning($"识图引擎后台下载异常：{ex.Message}");
+                    }
+                }
+            }
         }
 
         protected override void OnExit(ExitEventArgs e)
         {
             // 还原全屏颜色矩阵，避免护眼效果在进程退出后残留
             EyeCareManager.ResetEffect();
+
+            // 关闭增强 OCR 常驻子进程（幂等；失败不能影响其它退出清理）
+            try
+            {
+                RapidOcrBackend.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("关闭增强 OCR 子进程失败", ex);
+            }
+
             _switcherWindow?.Dispose();
             ClipboardHistoryManager.Instance.Dispose();
             base.OnExit(e);

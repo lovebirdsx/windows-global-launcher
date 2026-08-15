@@ -2,7 +2,7 @@
 Stop-Process -Name 'WindowsGlobalLauncher' -Force -ErrorAction SilentlyContinue
 
 # 删除旧的发布目录
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "bin\Release"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "src\WindowsGlobalLauncher\bin\Release"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "dist"
 
 # 编译，该exe会依赖.net 8运行时
@@ -14,7 +14,7 @@ if (-Not (Test-Path -Path $publishDir)) {
     New-Item -ItemType Directory -Path $publishDir | Out-Null
 }
 
-# 拷贝exe到发布目录
+# 拷贝exe到发布目录（TFM 为 net8.0-windows，升级 TFM 时须同步此路径）
 Copy-Item -Path "src\WindowsGlobalLauncher\bin\Release\net8.0-windows\win-x64\publish\WindowsGlobalLauncher.exe" -Destination $publishDir
 
 # 启动进程（以管理员权限运行，与 app.manifest requireAdministrator 一致）

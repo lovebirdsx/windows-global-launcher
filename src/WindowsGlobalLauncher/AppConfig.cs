@@ -47,6 +47,8 @@ namespace CommandLauncher
             new() { Action = "VolumeDown", HotKey = "Win+F11" },
             new() { Action = "ToggleMute", HotKey = "Win+F10" },
             new() { Action = "ShowClipboardHistory", HotKey = "Ctrl+Alt+C" },
+            new() { Action = "Screenshot", HotKey = "F4" },
+            new() { Action = "PinClipboard", HotKey = "F7" },
         ];
         public static string ConfigPath
         {
@@ -165,9 +167,14 @@ namespace CommandLauncher
                     // 向后兼容：旧配置文件没有 WindowActions 段时，补默认绑定，行为不回归
                     if (config.WindowActions == null || config.WindowActions.Count == 0)
                         config.WindowActions = DefaultWindowActions();
-                    // 向后兼容：旧配置缺少剪贴板历史绑定时补上默认热键（仅追加，不覆盖用户已有绑定）
-                    else if (!config.WindowActions.Any(a => string.Equals(a.Action, "ShowClipboardHistory", StringComparison.OrdinalIgnoreCase)))
+                    // 向后兼容：旧配置缺少后续新增动作的绑定时补上默认热键（仅追加，不覆盖用户已有绑定）。
+                    // 各动作独立 if 判定（不能用 else-if 链，否则用户同时缺多个绑定时只会补第一个）
+                    if (!config.WindowActions.Any(a => string.Equals(a.Action, "ShowClipboardHistory", StringComparison.OrdinalIgnoreCase)))
                         config.WindowActions.Add(new() { Action = "ShowClipboardHistory", HotKey = "Ctrl+Alt+C" });
+                    if (!config.WindowActions.Any(a => string.Equals(a.Action, "Screenshot", StringComparison.OrdinalIgnoreCase)))
+                        config.WindowActions.Add(new() { Action = "Screenshot", HotKey = "F4" });
+                    if (!config.WindowActions.Any(a => string.Equals(a.Action, "PinClipboard", StringComparison.OrdinalIgnoreCase)))
+                        config.WindowActions.Add(new() { Action = "PinClipboard", HotKey = "F7" });
                     _config = config;
                     Logger.LogInfo($"成功加载配置文件，包含 {config.Commands.Count} 个命令");
                     
@@ -294,7 +301,7 @@ namespace CommandLauncher
   // 示例: ""Ctrl+Space"", ""Alt+R"", ""Win+L""
   ""HotKey"": """ + _config.HotKey + @""",
   // 窗口动作热键（全局生效）
-  // 可用 Action: ""CloseWindow""(关闭前台窗口，等同 Alt+F4) / ""VolumeUp""(增大音量) / ""VolumeDown""(减小音量) / ""ToggleMute""(切换静音) / ""ShowClipboardHistory""(剪贴板历史)
+  // 可用 Action: ""CloseWindow""(关闭前台窗口，等同 Alt+F4) / ""VolumeUp""(增大音量) / ""VolumeDown""(减小音量) / ""ToggleMute""(切换静音) / ""ShowClipboardHistory""(剪贴板历史) / ""Screenshot""(区域截图) / ""PinClipboard""(把剪贴板图片钉为屏幕贴图)
   ""WindowActions"": [";
 
                 for (int i = 0; i < _config.WindowActions.Count; i++)

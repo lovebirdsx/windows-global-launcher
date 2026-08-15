@@ -421,6 +421,8 @@ namespace CommandLauncher
 
                 var contextMenu = new System.Windows.Forms.ContextMenuStrip();
                 contextMenu.Items.Add("显示", null, (s, e) => ShowWindow());
+                contextMenu.Items.Add("截图", null, (s, e) => ScreenshotManager.StartCapture());
+                contextMenu.Items.Add("贴图 (剪贴板)", null, (s, e) => ScreenshotManager.PinFromClipboard());
                 contextMenu.Items.Add(BuildEyeCareMenu());
                 contextMenu.Items.Add("设定配置文件", null, (s, e) => AppConfig.SetConfigFile());
                 contextMenu.Items.Add("打开配置文件", null, (s, e) => AppConfig.OpenConfigFile());

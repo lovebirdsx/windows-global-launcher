@@ -23,4 +23,15 @@
       <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
     </application>
   </compatibility>
+
+  <!--
+    截图/贴图功能需要像素精确的多屏混合 DPI 坐标：
+    声明 PerMonitorV2，让进程全程以物理像素看待屏幕，
+    抓屏矩形、窗口吸附矩形、贴图定位才不会被 DPI 虚拟化缩放。
+  -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
 </assembly>

@@ -6,14 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含四个相互独立的功能：
+Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含五个相互独立的功能：
 
 1. **命令启动器**（`MainWindow`）：全局热键（默认 `Ctrl+Shift+I`）弹出的搜索式命令面板，从 JSON 配置读取命令并通过 `Process.Start` 执行。
 2. **Alt+Tab 窗口切换器**（`SwitcherWindow`）：接管系统 Alt+Tab，竖向列出当前窗口（图标 + 标题）供切换。
 3. **剪贴板历史**（`ClipboardWindow` + `ClipboardHistoryManager`）：后台记录系统复制历史（文本 + 图片），热键（默认 `Ctrl+Alt+C`）弹出紧凑历史面板，回车粘贴回原窗口。
-4. **护眼模式**（`EyeCareManager`）：内置「正常」「办公」两种色温/亮度模式，经命令启动器（搜「护眼」）或托盘菜单选择，通过 Magnification 全屏颜色矩阵生效。
+4. **截图与贴图**（`ScreenshotManager` + `ScreenshotOverlayWindow` + `PinWindow`）：Snipaste 式区域截图（默认 `F4`，框选/窗口吸附/标注/取色，确认后复制到剪贴板或 OCR 识别选区文字）与屏幕贴图（默认 `F7`，剪贴板图片钉为最顶层浮窗）。
+5. **护眼模式**（`EyeCareManager`）：内置「正常」「办公」两种色温/亮度模式，经命令启动器（搜「护眼」）或托盘菜单选择，通过 Magnification 全屏颜色矩阵生效。
 
-前三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出；护眼模式无独立窗口，启动时恢复上次选择。
+前三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出；截图/贴图为静态类无常驻窗口，由 `WindowActions` 热键或托盘菜单按需触发；护眼模式无独立窗口，启动时恢复上次选择。
 
 ## 常用命令
 
@@ -55,7 +56,7 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - `SwitcherWindow.ReloadActionBindings` 负责装配（跳过 Enabled=false / 解析失败 / 未知动作名，记日志），并在 `ConfigUpdated` 时 `Dispatcher.Invoke` 热更新。
 - 修饰键**精确匹配**（配置 Alt+Q 时 Alt+Shift+Q 不触发）；命中即吞键。动作 Callback 必须轻量，实际执行统一包 `Dispatcher.BeginInvoke`（钩子回调有 `LowLevelHooksTimeout` 限制）。
 - **Win 组合键的开始菜单抑制**：主键被吞掉后系统只看到 Win 按下+松开，会弹出开始菜单；`KeyboardHook` 在命中 Win 绑定时注入无映射掩码键（`keybd_event(0xFF)`，同 AutoHotkey 的 mask key 做法）避免此问题。
-- 内置动作：`CloseWindow`（关闭前台窗口，复用 `WindowEnumerator.CloseWindow`）、`VolumeUp`/`VolumeDown`/`ToggleMute`（`keybd_event` 模拟媒体键 `VK_VOLUME_*`）、`ShowClipboardHistory`（唤出剪贴板历史，经 `App.ClipboardHistoryWindow` 静态属性找到窗口实例）。
+- 内置动作：`CloseWindow`（关闭前台窗口，复用 `WindowEnumerator.CloseWindow`）、`VolumeUp`/`VolumeDown`/`ToggleMute`（`keybd_event` 模拟媒体键 `VK_VOLUME_*`）、`ShowClipboardHistory`（唤出剪贴板历史，经 `App.ClipboardHistoryWindow` 静态属性找到窗口实例）、`Screenshot`/`PinClipboard`（区域截图/剪贴板贴图，调 `ScreenshotManager` 静态方法；默认绑定裸 `F4`/`F7`——无修饰键热键只能走本表驱动路径，`HotKeyListener.RegisterHotKey` 拒绝无修饰键；注意裸键命中即全局吞掉，Excel 等应用内 F4 会失效，属用户已确认的取舍）。
 - 旧配置文件无 `WindowActions` 字段时 `LoadConfig` 自动补默认绑定（`AppConfig.DefaultWindowActions()`）；后续新增动作的默认绑定也要在 `LoadConfig` 里做「缺失则追加」的定向迁移（参照 ShowClipboardHistory 的写法），否则已有配置的老用户拿不到新热键。新增字段须同步 `AppConfig.SaveConfig` 手写 JSON 拼接。
 
 ## 剪贴板历史实现要点
@@ -72,9 +73,23 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - **条目预览**：选中条目时弹出独立预览窗（`_previewWindow`，`ShowActivated=false` 不抢焦点），位于主窗口右侧、放不下翻左侧，钳制在屏幕工作区内（定位统一走 `PlacePreview`）。图片条目尽量按原始像素显示，超过上限（720×560 与工作区 50%/60% 取较小）则等比缩小，预览图经 `ClipboardHistoryManager.LoadFullImage` 加载并缓存在条目上（`ClipboardEntry.PreviewImage`）。`ShowImagePreview` 先按预览上限（含 DPI 换算）算出 `maxPixelWidth` 传给 `LoadFullImage`，`LoadBitmap` 仅在原图更宽时才设 `DecodePixelWidth`（只降不升），避免接近 5MB 上限的大图在 UI 线程全量解码造成长阻塞；`ClipboardEntry.PreviewImageDecodedWidth`（`JsonIgnore`）记录实际解码宽度，复用缓存要求缓存宽度 ≥ 当前需求、否则按更大宽度重解码。`SetToClipboard`（全尺寸）与列表缩略图（52px）语义不变；文本条目单行预览放不下（`Preview.Length > TextPreviewThreshold`）时显示折行完整文本（超长截断至 `TextPreviewMaxChars`，滚轮可滚动，滚动条刻意隐藏——点击会激活预览窗导致主窗口失焦关闭）。注意 `RefreshList` 在 `Show()` 之前触发 `SelectionChanged` 时窗口尚不可见，`ShowHistory` 末尾需补调一次 `UpdatePreview()`。
 - **列表滚动条**：刻意不显示——垂直 `Hidden`（保留滚动，键盘导航 `ScrollIntoView` 与滚轮仍可用），水平 `Disabled`（内容约束在列表宽度内，超长文本走省略号截断）。
 
-## Alt+Tab 切换器实现要点
+## 截图与贴图实现要点
 
-涉及文件：`KeyboardHook.cs`、`WindowEnumerator.cs`、`SwitcherWindow.cs`、`WindowInfo.cs`。
+涉及文件：`ScreenshotManager.cs`（编排 + `SnipAction`/`SnipResult` 契约）、`ScreenCapture.cs`（抓屏）、`WindowRectSnapshot.cs`（窗口吸附）、`ScreenshotOverlayWindow.cs`（全屏遮罩交互）、`AnnotationController.cs`（标注层）、`PinWindow.cs`（贴图浮窗）、`ScreenshotGeometry.cs`（纯几何/格式化，配套单测 `ScreenshotGeometryTests`）。
+
+- **DPI 前提：app.manifest 声明 PerMonitorV2**（为截图新增）。全进程坐标语义：`Screen`/`Cursor.Position`/抓屏矩形 = 物理像素，WPF `Left/Top/Width/Height` = DIP，换算因子 `VisualTreeHelper.GetDpi(window)`。现有窗口的「物理 ÷ 窗口 DPI」换算数学在 PMv2 下比原 system-aware 更精确，无需改动。
+- **单一遮罩窗口覆盖整个虚拟屏**：PMv2 窗口 DWM 不做位图缩放（缓冲区 1:1 映射物理像素），故 `SetWindowPos` 以物理像素铺满虚拟屏后，所有换算只有一条公式 `DIP = (物理 − 虚拟屏原点) / 窗口scale`，冻结帧在所有屏（含混合 DPI）上像素精确。**选区真相源是虚拟屏物理像素 `System.Drawing.Rectangle`**，渲染时才换算 DIP。**遮罩窗口严禁订阅 `DpiChanged` 并在处理器里改布局**：系统会派发一次虚假 DpiChanged（Old==New==当前缩放），处理器中调用布局修改（如 ApplyLayout 设置 Canvas/Image 尺寸）会让 WPF 对该全屏窗口做一次「DPI 倍数」的二次缩放——屏幕左上出现黑边、内容放大 1.25 倍（对照实验：空操作处理器或不订阅均正常）。窗口每次截图新建、定位后不移动，DPI 恒定，无需响应。
+- **先冻结再框选**（Snipaste 做法）：`Graphics.CopyFromScreen` 一次抓整个虚拟屏 → `CreateBitmapSourceFromHBitmap`（`DeleteObject` 释放 GDI 句柄）→ Freeze。遮罩、放大镜取色、标注、输出全部基于冻结帧。**护眼模式的 Magnification 颜色矩阵会包含在抓屏结果里**（实测 Win10 19045：`CopyFromScreen` 拿到的是矩阵处理后的像素）——为保证成品图/取色为真实色彩，`StartCapture` 在抓屏前 `EyeCareManager.SuspendEffect()` 临时写恒等矩阵（不改 CurrentModeName/持久化）、`DwmFlush()`×2 等 DWM 合成生效后抓屏，`finally` 中 `ResumeEffect()` 立即恢复；恢复后遮罩显示冻结帧时矩阵恰好生效一次，观感与平时护眼桌面一致。挂起失败（Mag API 失败）时降级为直接抓屏（含护眼色彩）并记 WARN。抓屏 INFO 日志带当前护眼模式名与是否挂起。
+- **窗口吸附**：遮罩弹出前 `WindowRectSnapshot.Capture` 一次性 EnumWindows（Z 序）+ `DWMWA_EXTENDED_FRAME_BOUNDS` 缓存矩形快照，鼠标移动时命中测试（比 Alt+Tab 过滤更宽松：不查 owner，但排除本进程窗口）。
+- **遮罩状态机**：Hovering（吸附高亮 + 放大镜取色，`C`/`Shift+C` 复制 HEX/RGB）→ Dragging（拖拽 <4px 视为点击 = 选中悬停矩形）→ Selected（8 手柄 + 方向键微调 + 工具条）→ Annotating（工具激活即选区锁定，鼠标转发 `AnnotationController`）。`Completed` 事件**恰好触发一次**且**在 OnClosed 之后统一派发**——确认结果先暂存 `_pendingResult` 再 `Close()`，因为 `HandleResult` 里的 `SaveFileDialog` 是模态对话框，必须等全屏 Topmost 遮罩关闭后再弹，否则被挡住像卡死。
+- **输出合成**：`CroppedBitmap` 裁冻结帧 + `VisualBrush`（`ViewboxUnits=Absolute`，Viewbox=选区 DIP）截取标注 Canvas，`RenderTargetBitmap(selW, selH, 96×scale, 96×scale)` 渲染——输出像素尺寸精确等于选区物理尺寸。复制走 `Clipboard.SetImage`，剪贴板历史经 `WM_CLIPBOARDUPDATE` 自动捕获（SHA1 去重），无需额外登记。
+- **标注层**（`AnnotationController`）：挂在宿主 Canvas 上（`IsHitTestVisible=false`，鼠标由遮罩统一转发 DIP 坐标）；矩形/椭圆/箭头（`ScreenshotGeometry.BuildArrowPolygon` 七点实心多边形）/画笔（抽稀 Polyline）/文字（编辑中 TextBox，落定转 TextBlock；TextBox 的 Enter/Esc 自行 Handled，遮罩 PreviewKeyDown 见 `Keyboard.FocusedElement is TextBox` 即放行）；撤销栈只含已落定元素；`Clear` 用 `_ownedElements` 集合只删自己创建的。
+- **贴图浮窗**（`PinWindow`）：构造即 `Show()`，1:1 物理像素显示（基准 DIP = `PixelWidth / DpiScale`，**必须用 PixelWidth**——剪贴板图片 DPI 元数据会让 `Width` 不可靠），`Loaded` 后重读 DPI 校正一次。滚轮缩放以光标为锚（10%~500%）、`Ctrl+滚轮` 调透明度、双击/Esc 关闭、右键菜单（复制/保存/缩放100%/关闭所有）。静态 `_open` 列表跟踪全部实例（构造加入、`Closed` 移除），`CloseAll` 遍历副本。
+- **热键**：`Screenshot`(F4)/`PinClipboard`(F7) 走 `WindowActions` 表驱动路径（见上文窗口动作小节），入口 `ScreenshotManager.StartCapture`/`PinFromClipboard` 仅 UI 线程调用；`IsCapturing` 防截图会话重入。**截图会话进行中按 F7 = 钉图当前选区**：F7 被全局钩子吞掉、到不了遮罩窗口，`PinFromClipboard` 检测 `IsCapturing` 且 `_activeOverlay` 非空时转发 `overlay.PinCurrentSelection()`（Selected/Annotating 态等同点工具条 📌，未框选则忽略记 INFO）。剪贴板读写统一「`ExternalException` 重试 3 次 × 50ms」。
+- **OCR 识别选区文字**（`OcrService` + `OcrResultWindow`，工具条 🔤 触发 `Finish(SnipAction.Ocr)`）：识别源是**纯冻结帧选区裁剪**——`CroppedBitmap`（冻结帧, 选区物理矩形相对虚拟屏原点, 与虚拟屏求交防越界）Freeze 后直接作为 `SnipResult.Image`，**不含标注、不含压暗层**（标注图形会干扰识别；护眼矩阵抓屏前已挂起故颜色干净）；非 OCR 动作仍走含标注的 `RenderTargetBitmap` 合成。图像不做任何预处理（交给 RapidOCR 自带预处理）——**勿加「深色反色/自适应放大」类预处理**：实测反而降低识别率（反色误伤混合底色、插值放大让笔画发虚），已试过并回退。结果窗可编辑/复制（`Ctrl+Enter` 复制并关窗）；`ScreenshotManager.RunOcr` 用 `async void` fire-and-forget，图片为 null 或识别失败也会 `SetResult(null)`，弹窗不卡加载态。
+- **OCR 单引擎（RapidOCR / PP-OCR，无 Windows OCR 回退）**：`RapidOcrBackend` 常驻子进程经 stdin/stdout 传 JSON，`--ensureAscii=1` 规避编码、`--maxSideLen=2048`；安装检测 = 数据目录 `ocr-engine\` 递归找 exe（结果缓存，`InvalidateInstallCache()` 刷新）。`OcrService` 是薄门面：`IsReady => RapidOcrBackend.IsInstalled`，`RecognizeAsync` 包装 `RapidOcrBackend.RecognizeAsync`（`""` → null、异常兜底记日志）。引擎包（约 70MB，GitHub 直连 + 镜像多源，SharpCompress 解 7z）在 `App.OnStartup` 末尾 fire-and-forget 后台下载：`OcrEngineInstaller.EnsureInstalledAsync` 合流（lock + `_currentInstall`，多处并发共享同一进行中任务、不重复下载），成功记 INFO「识图引擎后台下载完成」、失败记 WARN 不弹窗。未就绪时 `RunOcr` 先 `SetDownloading()`（主文本区只读显示「识图引擎正在下载…」+ 订阅 `StatusChanged` 实时刷新进度，`Dispatcher` 切回 UI 线程、`OnClosed` 退订防泄漏），下载失败 `SetEngineUnavailable(reason)` 展示原因 + `ManualInstallHint` + 「重试下载」链接按钮（重试成功显示「引擎已就绪，请关闭后重新识别」）。`App.OnExit` 调 `RapidOcrBackend.Shutdown()` 杀常驻子进程（幂等，try/catch 不阻断其它清理）。
+
+## Alt+Tab 切换器实现要点涉及文件：`KeyboardHook.cs`、`WindowEnumerator.cs`、`SwitcherWindow.cs`、`WindowInfo.cs`。
 
 - **钩子回调运行在 UI 线程**（在 UI 线程安装），且系统对回调有超时（`LowLevelHooksTimeout`）。回调本体只做按键判定，所有重活（枚举窗口、显示、激活）通过 `Dispatcher.BeginInvoke` 异步执行。委托实例必须用字段强引用，防止被 GC 回收导致钩子失效。
 - **激活态状态机**：`SwitcherWindow._isActive` 是唯一真相源（仅在 UI 线程读写）。钩子通过 `IsSwitcherActive` 委托读取它，决定是否吞掉 Esc / 导航键 / 触发 Commit。交互：Alt+Tab 显示并向后移动，Shift+Tab 向前，激活态下 `↑/↓` 与 `Ctrl+P/Ctrl+N` 也可移动，松开 Alt = Commit（激活选中窗口），Esc = Cancel。

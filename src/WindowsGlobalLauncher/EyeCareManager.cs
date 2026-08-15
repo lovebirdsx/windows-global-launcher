@@ -79,6 +79,47 @@ namespace CommandLauncher
             }
         }
 
+        /// <summary>
+        /// 临时挂起护眼颜色效果（只写恒等矩阵，不改 CurrentModeName 与持久化状态）。
+        /// 供截图抓屏前调用，避免成品图被颜色矩阵污染。返回是否实际挂起了效果
+        /// （当前已是「正常」或写矩阵失败时返回 false，调用方据此决定是否需要恢复）。
+        /// </summary>
+        public static bool SuspendEffect()
+        {
+            if (CurrentModeName == "正常")
+            {
+                return false;
+            }
+            try
+            {
+                ApplyMatrix(BuildIdentity());
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"临时挂起护眼颜色矩阵失败，抓屏将包含护眼色彩: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>恢复 SuspendEffect 挂起前的模式矩阵（按 CurrentModeName 重新应用）。</summary>
+        public static void ResumeEffect()
+        {
+            var mode = Modes.FirstOrDefault(m => m.Name == CurrentModeName);
+            if (mode == null || mode.Name == "正常")
+            {
+                return;
+            }
+            try
+            {
+                ApplyMatrix(BuildMatrix(mode));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"恢复护眼颜色矩阵失败（模式: {mode.Name}），屏幕将停留在无护眼状态", ex);
+            }
+        }
+
         /// <summary>还原为单位矩阵（关闭护眼效果）。程序退出时调用，避免颜色效果残留。</summary>
         public static void ResetEffect()
         {

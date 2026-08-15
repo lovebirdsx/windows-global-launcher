@@ -31,6 +31,8 @@ namespace CommandLauncher
                 ["VolumeDown"] = () => PressMediaKey(VK_VOLUME_DOWN),
                 ["ToggleMute"] = () => PressMediaKey(VK_VOLUME_MUTE),
                 ["ShowClipboardHistory"] = () => App.ClipboardHistoryWindow?.ShowHistory(),
+                ["Screenshot"] = ScreenshotManager.StartCapture,
+                ["PinClipboard"] = ScreenshotManager.PinFromClipboard,
             };
 
         /// <summary>

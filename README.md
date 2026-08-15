@@ -1,6 +1,6 @@
 # Windows Global Launcher
 
-常驻系统托盘的 Windows 桌面工具,包含四个相互独立的功能:命令启动器、Alt+Tab 窗口切换器、剪贴板历史与护眼模式。平时隐藏在后台,靠全局热键唤出。
+常驻系统托盘的 Windows 桌面工具,包含五个相互独立的功能:命令启动器、Alt+Tab 窗口切换器、剪贴板历史、截图与贴图、护眼模式。平时隐藏在后台,靠全局热键唤出。
 
 ## 功能
 
@@ -30,6 +30,26 @@
 * 选中条目在旁边弹出预览：图片显示原图，过长文本显示折行完整内容
 * 超长文本（>5 万字符）与超大图片（>5MB）不记录
 
+### 截图与贴图
+
+Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F7`，均可在 `WindowActions` 段改绑）。完整支持多显示器与混合 DPI（PerMonitorV2），截图像素精确。
+
+**截图（`F4`）**：冻结全屏后进入框选——
+
+* 悬停自动吸附窗口边界（高亮该窗口），单击即选中；或拖拽自由框选
+* 放大镜实时取色：`C` 复制 HEX、`Shift+C` 复制 RGB
+* 护眼模式开启时截图不受影响：抓屏瞬间自动挂起护眼色彩矩阵，成品图与取色结果均为真实颜色
+* 选中后可拖动/8 方向手柄调整选区；方向键平移 1 像素、`Shift+方向键` 缩放 1 像素
+* 标注工具条：矩形、椭圆、箭头、画笔、文字，4 种颜色，`Ctrl+Z` 撤销
+* 确认：`Enter`/双击/工具条 ✓ 复制到剪贴板（自动进入剪贴板历史）；也可钉图（工具条 📌 或直接按 `F7`）、保存 PNG 💾、工具条 🔤 识别选区文字（弹窗可编辑、复制，`Ctrl+Enter` 复制并关窗；识别引擎首次启动自动后台下载，下载完成前暂不可用）；`Esc` 取消
+
+**贴图（`F7`）**：把剪贴板中的图片钉在屏幕最顶层（截图工具条的 📌 亦可）——
+
+* 左键拖动移动；滚轮缩放（10%~500%，光标为锚点）；`Ctrl+滚轮` 调透明度
+* 双击或 `Esc` 关闭；右键菜单：复制图像 / 保存为文件 / 缩放 100% / 关闭所有贴图
+
+> 注意:默认热键是无修饰键的 `F4`/`F7`,命中后按键被全局吞掉——Excel 的 `F4`(重复上一操作/切换绝对引用)等应用内同名快捷键会失效。介意的话在配置中改绑其它组合键即可。
+
 ### 护眼模式
 
 内置 2 种护眼模式（参数对照 CareUEyes 官方文档），在命令面板搜索「护眼」或「eye」即可选择，回车立即生效；托盘菜单「护眼模式」子菜单也可切换（当前模式打勾）。
@@ -53,11 +73,14 @@
 | `Win+F11`    | `VolumeDown`           | 减小系统音量                     |
 | `Win+F10`    | `ToggleMute`           | 切换系统静音                     |
 | `Ctrl+Alt+C` | `ShowClipboardHistory` | 弹出剪贴板历史                   |
+| `F4`         | `Screenshot`           | 区域截图                         |
+| `F7`         | `PinClipboard`         | 把剪贴板图片钉为屏幕贴图         |
 
 ## 运行
 
 * 要求 **.NET 8 运行时**
 * **需以管理员权限运行**:窗口切换器依赖低级键盘钩子,否则无法拦截以管理员权限运行的程序的 Alt+Tab
+* OCR 识别引擎（基于 RapidOCR/PP-OCR，约 70MB）在首次启动时自动后台下载到数据目录，离线运行；下载完成前识别暂不可用（弹窗显示下载进度）
 * 程序常驻系统托盘,右键托盘菜单可打开配置、查看日志或退出
 
 ## 配置
@@ -84,7 +107,9 @@
     { "Action": "VolumeUp", "HotKey": "Win+F12", "Enabled": true },
     { "Action": "VolumeDown", "HotKey": "Win+F11", "Enabled": true },
     { "Action": "ToggleMute", "HotKey": "Win+F10", "Enabled": true },
-    { "Action": "ShowClipboardHistory", "HotKey": "Ctrl+Alt+C", "Enabled": true }
+    { "Action": "ShowClipboardHistory", "HotKey": "Ctrl+Alt+C", "Enabled": true },
+    { "Action": "Screenshot", "HotKey": "F4", "Enabled": true },
+    { "Action": "PinClipboard", "HotKey": "F7", "Enabled": true }
   ],
   "Commands": [
     {
@@ -100,7 +125,7 @@
 
 > `RunAsAdmin` 可选,默认 `false`:命令以普通用户权限启动(借用桌面 Shell 令牌降权)。设为 `true` 则保留管理员权限启动。降权失败(如 explorer 未运行)时会报错且不启动该命令。
 
-> `WindowActions` 可选,缺省时补默认绑定。`Action` 当前可用值:`CloseWindow`(关闭前台窗口)、`VolumeUp`/`VolumeDown`(增大/减小系统音量)、`ToggleMute`(切换静音)、`ShowClipboardHistory`(剪贴板历史);`Enabled` 设为 `false` 可临时停用某条绑定。修饰键为精确匹配(如配置 `Alt+Q` 时 `Alt+Shift+Q` 不会触发)。
+> `WindowActions` 可选,缺省时补默认绑定。`Action` 当前可用值:`CloseWindow`(关闭前台窗口)、`VolumeUp`/`VolumeDown`(增大/减小系统音量)、`ToggleMute`(切换静音)、`ShowClipboardHistory`(剪贴板历史)、`Screenshot`(区域截图)、`PinClipboard`(把剪贴板图片钉为屏幕贴图);`Enabled` 设为 `false` 可临时停用某条绑定。修饰键为精确匹配(如配置 `Alt+Q` 时 `Alt+Shift+Q` 不会触发)。
 
 ## 开发
 

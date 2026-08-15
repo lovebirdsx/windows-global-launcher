@@ -10,4 +10,9 @@
     <ApplicationIcon>app.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 增强 OCR 安装器：7z 解压（RapidOCR-json 增强包为 7z 格式） -->
+    <PackageReference Include="SharpCompress" Version="0.50.4" />
+  </ItemGroup>
 </Project>
