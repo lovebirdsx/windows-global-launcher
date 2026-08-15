@@ -69,6 +69,7 @@ namespace CommandLauncher
         private TextBlock _magLine1 = null!;
         private TextBlock _magLine2 = null!;
         private readonly ToggleButton[] _toolButtons = new ToggleButton[5];
+        private TextBlock _settingIndicator = null!;
         private static readonly AnnotationTool[] ToolOrder =
             { AnnotationTool.Rectangle, AnnotationTool.Ellipse, AnnotationTool.Arrow, AnnotationTool.Pen, AnnotationTool.Text };
         private readonly System.Collections.Generic.List<Border> _colorSwatches = new();
@@ -113,7 +114,12 @@ namespace CommandLauncher
             _frozen = frozen;
             _virtualBounds = virtualBounds;
             _snapshot = snapshot;
-            _annotation = new AnnotationController(_annotationCanvas);
+            // 恢复上次会话的颜色/线宽/字号（新元素直接沿用，会话结束再写回 AppState）
+            _annotation = new AnnotationController(
+                _annotationCanvas,
+                AppState.Instance.GetAnnotationStrokeWidth(),
+                AppState.Instance.GetAnnotationTextFontSize());
+            _annotation.StrokeColor = ScreenshotGeometry.ParseHex(AppState.Instance.GetAnnotationStrokeColor());
 
             WindowStyle = WindowStyle.None;
             AllowsTransparency = false;     // 整窗不透明（性能好），压暗靠内容层
@@ -144,6 +150,7 @@ namespace CommandLauncher
             MouseMove += OnOverlayMouseMove;
             MouseLeftButtonUp += OnOverlayMouseUp;
             PreviewKeyDown += OnOverlayPreviewKeyDown;
+            PreviewMouseWheel += OnOverlayPreviewMouseWheel;
         }
 
         // ================= 初始化与布局 =================
@@ -400,6 +407,23 @@ namespace CommandLauncher
             foreach (var handle in _handles)
                 handle.Visibility = Visibility.Visible;
             UpdateSelectionVisuals();
+            RestoreLastTool();
+        }
+
+        /// <summary>恢复上次会话选中的标注工具（非 None 时自动激活，进入标注态）。</summary>
+        private void RestoreLastTool()
+        {
+            string toolName = AppState.Instance.GetAnnotationTool();
+            if (!Enum.TryParse<AnnotationTool>(toolName, out var tool))
+                return;
+            for (int i = 0; i < ToolOrder.Length; i++)
+            {
+                if (ToolOrder[i] == tool)
+                {
+                    _toolButtons[i].IsChecked = true; // 触发 OnToolChecked，自动进入标注态
+                    return;
+                }
+            }
         }
 
         /// <summary>整体移动选区（保持尺寸，钳制在虚拟屏内）。</summary>
@@ -512,6 +536,27 @@ namespace CommandLauncher
             }
         }
 
+        /// <summary>标注态滚轮：跟随当前工具调线宽（线条类）或字号（文字），未选工具不响应。</summary>
+        private void OnOverlayPreviewMouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (_state != OverlayState.Annotating)
+                return;
+
+            var tool = _annotation.ActiveTool;
+            if (tool is AnnotationTool.Rectangle or AnnotationTool.Ellipse or AnnotationTool.Arrow or AnnotationTool.Pen)
+            {
+                _annotation.AdjustStrokeWidth(e.Delta > 0 ? 1.0 : -1.0);
+                UpdateSettingIndicator();
+                e.Handled = true;
+            }
+            else if (tool == AnnotationTool.Text)
+            {
+                _annotation.AdjustTextFontSize(e.Delta > 0 ? 1.0 : -1.0);
+                UpdateSettingIndicator();
+                e.Handled = true;
+            }
+        }
+
         // ================= 视觉更新 =================
 
         /// <summary>Hovering 态：命中窗口矩形或光标所在屏幕，挖洞高亮 + 尺寸角标。</summary>
@@ -549,12 +594,7 @@ namespace CommandLauncher
             }
 
             if (_toolbar.Visibility == Visibility.Visible)
-            {
-                _toolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-                var pos = ScreenshotGeometry.PlaceToolbar(dipRect, _toolbar.DesiredSize, CanvasRectDip);
-                Canvas.SetLeft(_toolbar, pos.X);
-                Canvas.SetTop(_toolbar, pos.Y);
-            }
+                RepositionToolbar();
         }
 
         /// <summary>压暗层挖洞：全屏矩形 Exclude 指定物理矩形。</summary>
@@ -671,6 +711,15 @@ namespace CommandLauncher
                 UpdateSelectionVisuals();
         }
 
+        /// <summary>按当前选区重新测量并摆放工具条；指示器文本变化导致宽度改变时也复用此方法。</summary>
+        private void RepositionToolbar()
+        {
+            _toolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            var pos = ScreenshotGeometry.PlaceToolbar(ToDipRect(_selection), _toolbar.DesiredSize, CanvasRectDip);
+            Canvas.SetLeft(_toolbar, pos.X);
+            Canvas.SetTop(_toolbar, pos.Y);
+        }
+
         // ================= 工具条 =================
 
         private void BuildToolbar()
@@ -699,6 +748,19 @@ namespace CommandLauncher
 
             panel.Children.Add(MakeSeparator());
 
+            // 线宽/字号指示器：选中工具后常驻显示，滚轮实时刷新
+            _settingIndicator = new TextBlock
+            {
+                FontSize = 11,
+                Foreground = Brushes.White,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(4, 0, 2, 0),
+                Visibility = Visibility.Collapsed,
+            };
+            panel.Children.Add(_settingIndicator);
+
+            panel.Children.Add(MakeSeparator());
+
             // 颜色块
             Color[] palette = { Color.FromRgb(255, 64, 64), Color.FromRgb(255, 212, 0), AccentBlue, Colors.White };
             foreach (var color in palette)
@@ -706,8 +768,8 @@ namespace CommandLauncher
                 var swatchColor = color; // 闭包捕获
                 var swatch = new Border
                 {
-                    Width = 16,
-                    Height = 16,
+                    Width = 18,
+                    Height = 18,
                     Margin = new Thickness(3, 0, 3, 0),
                     VerticalAlignment = VerticalAlignment.Center,
                     Background = new SolidColorBrush(swatchColor),
@@ -725,9 +787,9 @@ namespace CommandLauncher
             panel.Children.Add(MakeSeparator());
 
             panel.Children.Add(MakeActionButton("↶", "撤销 (Ctrl+Z)", () => _annotation.Undo()));
-            panel.Children.Add(MakeActionButton("📌", "钉图：把选区钉为屏幕贴图", () => Finish(SnipAction.Pin)));
-            panel.Children.Add(MakeActionButton("🔤", "识别文字 (OCR)", () => Finish(SnipAction.Ocr)));
-            panel.Children.Add(MakeActionButton("💾", "保存为 PNG 文件", () => Finish(SnipAction.SaveToFile)));
+            panel.Children.Add(MakeActionButton("", "钉图：把选区钉为屏幕贴图", () => Finish(SnipAction.Pin), fontFamily: "Segoe MDL2 Assets"));
+            panel.Children.Add(MakeActionButton("Aa", "识别文字 (OCR)", () => Finish(SnipAction.Ocr)));
+            panel.Children.Add(MakeActionButton("", "保存为 PNG 文件", () => Finish(SnipAction.SaveToFile), fontFamily: "Segoe MDL2 Assets"));
             panel.Children.Add(MakeActionButton("✕", "取消 (Esc)", CancelAndClose));
             panel.Children.Add(MakeActionButton("✓", "复制到剪贴板 (Enter / 双击)", () => Finish(SnipAction.CopyToClipboard), accent: true));
 
@@ -749,13 +811,13 @@ namespace CommandLauncher
         private static Rectangle MakeSeparator() => new()
         {
             Width = 1,
-            Height = 16,
+            Height = 18,
             Margin = new Thickness(4, 0, 4, 0),
             VerticalAlignment = VerticalAlignment.Center,
             Fill = new SolidColorBrush(Color.FromArgb(90, 255, 255, 255)),
         };
 
-        private Button MakeActionButton(string glyph, string tip, Action onClick, bool accent = false)
+        private Button MakeActionButton(string glyph, string tip, Action onClick, bool accent = false, string? fontFamily = null)
         {
             var button = new Button
             {
@@ -763,6 +825,8 @@ namespace CommandLauncher
                 ToolTip = tip,
                 Style = MakeToolbarButtonStyle(toggle: false, accent),
             };
+            if (fontFamily != null)
+                button.FontFamily = new FontFamily(fontFamily);
             button.Click += (_, _) => onClick();
             return button;
         }
@@ -776,7 +840,7 @@ namespace CommandLauncher
             var border = new FrameworkElementFactory(typeof(Border), "border");
             border.SetValue(Border.BackgroundProperty, accent ? new SolidColorBrush(AccentBlue) : Brushes.Transparent);
             border.SetValue(Border.CornerRadiusProperty, new CornerRadius(4));
-            border.SetValue(Border.PaddingProperty, new Thickness(8, 4, 8, 4));
+            border.SetValue(Border.PaddingProperty, new Thickness(0));
 
             var content = new FrameworkElementFactory(typeof(ContentPresenter));
             content.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Center);
@@ -801,6 +865,8 @@ namespace CommandLauncher
             style.Setters.Add(new Setter(TemplateProperty, template));
             style.Setters.Add(new Setter(ForegroundProperty, Brushes.White));
             style.Setters.Add(new Setter(FontSizeProperty, 14.0));
+            style.Setters.Add(new Setter(WidthProperty, 30.0));   // 统一固定尺寸，内容居中
+            style.Setters.Add(new Setter(HeightProperty, 30.0));
             style.Setters.Add(new Setter(MarginProperty, new Thickness(2, 0, 2, 0)));
             style.Setters.Add(new Setter(FocusableProperty, false)); // 按钮不抢窗口键盘焦点
             return style;
@@ -820,6 +886,7 @@ namespace CommandLauncher
             foreach (var handle in _handles)
                 handle.Visibility = Visibility.Collapsed;
             UpdateSelectionVisuals();
+            UpdateSettingIndicator();
         }
 
         /// <summary>工具取消：若已无任何工具选中，回到 Selected（恢复手柄）。</summary>
@@ -837,6 +904,7 @@ namespace CommandLauncher
                 foreach (var handle in _handles)
                     handle.Visibility = Visibility.Visible;
                 UpdateSelectionVisuals();
+                UpdateSettingIndicator();
             }
         }
 
@@ -854,6 +922,27 @@ namespace CommandLauncher
                 bool selected = (Color)swatch.Tag == _annotation.StrokeColor;
                 swatch.BorderBrush = selected ? Brushes.White : new SolidColorBrush(Color.FromArgb(90, 255, 255, 255));
             }
+        }
+
+        /// <summary>刷新线宽/字号指示器：跟随当前工具显示「粗细 N」或「字号 N」，未选工具时隐藏。</summary>
+        private void UpdateSettingIndicator()
+        {
+            var tool = _annotation.ActiveTool;
+            if (tool is AnnotationTool.Rectangle or AnnotationTool.Ellipse or AnnotationTool.Arrow or AnnotationTool.Pen)
+            {
+                _settingIndicator.Text = $"粗细 {_annotation.StrokeWidth:0}";
+                _settingIndicator.Visibility = Visibility.Visible;
+            }
+            else if (tool == AnnotationTool.Text)
+            {
+                _settingIndicator.Text = $"字号 {_annotation.TextFontSize:0}";
+                _settingIndicator.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                _settingIndicator.Visibility = Visibility.Collapsed;
+            }
+            RepositionToolbar();
         }
 
         // ================= 输出合成与收尾 =================
@@ -962,6 +1051,12 @@ namespace CommandLauncher
         protected override void OnClosed(EventArgs e)
         {
             base.OnClosed(e);
+            // 会话结束写回本次的工具/颜色/线宽/字号，供下次截图恢复
+            AppState.Instance.SetAnnotationSettings(
+                _annotation.ActiveTool.ToString(),
+                ScreenshotGeometry.FormatHex(_annotation.StrokeColor.R, _annotation.StrokeColor.G, _annotation.StrokeColor.B),
+                _annotation.StrokeWidth,
+                _annotation.TextFontSize);
             RaiseCompleted(_pendingResult ?? new SnipResult(SnipAction.Cancel, null, default));
         }
     }

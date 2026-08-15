@@ -20,6 +20,12 @@ namespace CommandLauncher
             public List<CommandExecuteInfo> CommandExecuteInfos { get; set; } = [];
             // 当前护眼模式名（见 EyeCareManager.Modes），空串表示未设置
             public string EyeCareMode { get; set; } = "";
+            // 上次截图标注：工具枚举名（"None"/"Rectangle"/...），空串等同 None
+            public string AnnotationTool { get; set; } = "";
+            // 上次截图标注：颜色（"#RRGGBB"）、线宽与文字字号（默认与 AnnotationController 一致）
+            public string AnnotationStrokeColor { get; set; } = "#FF4040";
+            public double AnnotationStrokeWidth { get; set; } = 3.0;
+            public double AnnotationTextFontSize { get; set; } = 16.0;
         }
 
         static string AppStateFilePath
@@ -95,6 +101,36 @@ namespace CommandLauncher
         public void SetEyeCareMode(string name)
         {
             _state.EyeCareMode = name;
+            SaveState();
+        }
+
+        public string GetAnnotationTool()
+        {
+            return _state.AnnotationTool;
+        }
+
+        public string GetAnnotationStrokeColor()
+        {
+            return _state.AnnotationStrokeColor;
+        }
+
+        public double GetAnnotationStrokeWidth()
+        {
+            return _state.AnnotationStrokeWidth;
+        }
+
+        public double GetAnnotationTextFontSize()
+        {
+            return _state.AnnotationTextFontSize;
+        }
+
+        /// <summary>一次写回截图标注设置（会话结束保存一次，避免滚轮高频写盘）。</summary>
+        public void SetAnnotationSettings(string tool, string strokeColor, double strokeWidth, double textFontSize)
+        {
+            _state.AnnotationTool = tool;
+            _state.AnnotationStrokeColor = strokeColor;
+            _state.AnnotationStrokeWidth = strokeWidth;
+            _state.AnnotationTextFontSize = textFontSize;
             SaveState();
         }
 

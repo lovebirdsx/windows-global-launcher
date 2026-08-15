@@ -48,6 +48,27 @@ namespace CommandLauncher
         /// <summary>颜色格式化为 "255, 128, 0"（逗号 + 空格分隔）。</summary>
         public static string FormatRgb(byte r, byte g, byte b) => $"{r}, {g}, {b}";
 
+        /// <summary>解析 "#RRGGBB"（可省略 #）为 Color；格式非法时回退黑色。</summary>
+        public static Color ParseHex(string text)
+        {
+            string hex = text.TrimStart('#');
+            if (hex.Length == 6)
+            {
+                try
+                {
+                    byte r = Convert.ToByte(hex.Substring(0, 2), 16);
+                    byte g = Convert.ToByte(hex.Substring(2, 2), 16);
+                    byte b = Convert.ToByte(hex.Substring(4, 2), 16);
+                    return Color.FromRgb(r, g, b);
+                }
+                catch (FormatException)
+                {
+                    // 非法十六进制，落到下方返回黑色
+                }
+            }
+            return Colors.Black;
+        }
+
         /// <summary>
         /// 构造实心箭头七点多边形（尾部两点、颈部两点、头部翼两点、尖端一点）。
         /// width 为箭杆宽度；箭头翼宽 = 3 × width，头长 = min(4 × width, 0.4 × 全长)（短箭头时头长按比例退化）。
