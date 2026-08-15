@@ -220,8 +220,10 @@ namespace CommandLauncher
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
-                // ensureAscii=1 后 stdout 为纯 ASCII（非 ASCII 转成 \uXXXX），UTF-8（ASCII 兼容）即可
-                StandardInputEncoding = Encoding.UTF8,
+                // ensureAscii=1 后 stdout 为纯 ASCII（非 ASCII 转成 \uXXXX），UTF-8（ASCII 兼容）即可；
+                // 但输入侧必须无 BOM：Encoding.UTF8 带 BOM，StandardInput 的 StreamWriter 首次 Flush 会把
+                // EF BB BF 写到 stdin 首行 JSON 之前，引擎按 jsonIn[0]=='{' 判定失败 → 首次识别必失败（第二次 BOM 已写尽才成功）
+                StandardInputEncoding = new UTF8Encoding(false),
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8,
             };
