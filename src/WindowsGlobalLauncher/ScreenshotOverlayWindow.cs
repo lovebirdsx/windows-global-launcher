@@ -226,8 +226,10 @@ namespace CommandLauncher
             _scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
             ApplyLayout();
 
-            // 低级钩子触发的显示不抢焦点，这里显式激活以接收键盘
-            Activate();
+            // 低级钩子触发的显示不抢焦点，直接 Activate 会被前台锁定拒绝（窗口弹出但无键盘焦点，
+            // 导致 Esc/Enter/C/方向键等快捷键失效）。复用 WindowEnumerator.Activate 的
+            // AttachThreadInput 技巧绕过前台锁定，确保遮罩能接收键盘。
+            WindowEnumerator.Activate(new WindowInteropHelper(this).Handle);
             Focus();
 
             // 初始悬停：按当前鼠标位置立即高亮，避免「弹出后一动不动就没有反馈」
