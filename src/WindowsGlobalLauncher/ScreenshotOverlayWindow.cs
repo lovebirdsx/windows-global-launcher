@@ -146,6 +146,7 @@ namespace CommandLauncher
             // ApplyLayout 等布局修改，WPF 会对这个 PerMonitorV2 全屏窗口做一次「DPI 倍数」的
             // 二次缩放——表现为屏幕左上出现黑边、冻结帧内容被放大 1.25 倍（对照实验结论：
             // 空操作处理器或不订阅均正常，处理器内改布局即复现）。
+            PreviewMouseLeftButtonDown += OnOverlayPreviewMouseDown;
             MouseLeftButtonDown += OnOverlayMouseDown;
             MouseMove += OnOverlayMouseMove;
             MouseLeftButtonUp += OnOverlayMouseUp;
@@ -272,6 +273,51 @@ namespace CommandLauncher
 
         // ================= 鼠标交互 =================
 
+        /// <summary>
+        /// Preview 隧道阶段统一拦截双击：选区（Selected 或 Annotating 态）内双击 = 复制到剪贴板并结束。
+        /// 必须用 Preview（隧道）而非 bubbling——Annotating 态下鼠标在 bubbling 阶段已被转发给标注层
+        /// 绘制，且文字工具首击创建的 TextBox 会吃掉第二击，只有隧道阶段能可靠拿到双击。
+        /// 从 Hovering 直接双击某窗口时，首击已完成选中、次击确认，等效「双击窗口即截取该窗口」。
+        /// </summary>
+        private void OnOverlayPreviewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            if (e.ClickCount != 2)
+                return;
+
+            if (_state is not (OverlayState.Selected or OverlayState.Annotating))
+                return;
+
+            var phys = ToPhysical(e.GetPosition(_rootCanvas));
+            if (!_selection.Contains(phys))
+                return;
+
+            // 排除 1（工具条）：快速连点撤销/颜色等按钮不能误触发确认。Preview 隧道先于工具条
+            // 自身的 Handled 标记，必须显式排除；且工具条可能摆放在选区内部。IsAncestorOf 不含
+            // 参数自身，故同时判 v == _toolbar 更稳。
+            if (e.OriginalSource is Visual v && (v == _toolbar || _toolbar.IsAncestorOf(v)))
+                return;
+
+            // 排除 2（手柄）：点击选区手柄是缩放/微调，不能当成双击确认
+            if (Array.IndexOf(_handles, e.OriginalSource) >= 0)
+                return;
+
+            // 排除 3（正在编辑的非空文字框）：沿可视树向上（含起点自身）找 TextBox，有内容说明
+            // 用户是在双击选词，不能吞；空白（本次双击首击刚创建的空框）则放行确认——Finish 内部
+            // CommitPendingText 会把空框直接丢弃。遍历到 null 或 _rootCanvas 即停。
+            DependencyObject? node = e.OriginalSource as DependencyObject;
+            while (node != null && !ReferenceEquals(node, _rootCanvas))
+            {
+                if (node is TextBox tb && !string.IsNullOrWhiteSpace(tb.Text))
+                    return;
+                node = VisualTreeHelper.GetParent(node);
+            }
+
+            // 全部排除项通过：确认复制并吞掉本次事件。Handled 抑制 bubbling 的 OnOverlayMouseDown，
+            // 避免第二击又被当成移动选区/开始标注。
+            Finish(SnipAction.CopyToClipboard);
+            e.Handled = true;
+        }
+
         private void OnOverlayMouseDown(object sender, MouseButtonEventArgs e)
         {
             // 文字标注编辑中丢焦点会导致后续键盘失灵，这里点击空白处时把焦点拉回窗口
@@ -290,11 +336,6 @@ namespace CommandLauncher
                     break;
 
                 case OverlayState.Selected:
-                    if (e.ClickCount == 2 && _selection.Contains(phys))
-                    {
-                        Finish(SnipAction.CopyToClipboard);
-                        return;
-                    }
                     if (_selection.Contains(phys))
                     {
                         _dragHandle = 8; // 整体移动

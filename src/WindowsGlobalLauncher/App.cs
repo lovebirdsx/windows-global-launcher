@@ -45,6 +45,9 @@ namespace CommandLauncher
             // 恢复上次保存的护眼模式（内部会先还原单位矩阵，清理异常退出的颜色残留）
             EyeCareManager.RestoreLastMode();
 
+            // 清理历史遗留的孤儿 OCR 引擎进程（主程序曾被强杀/崩溃退出时，常驻子进程不会随之退出）
+            _ = Task.Run(RapidOcrBackend.KillOrphanedEngines);
+
             // 启动自动后台下载增强 OCR 引擎（fire-and-forget，合流，不打扰不弹窗）
             if (!RapidOcrBackend.IsInstalled)
             {

@@ -84,6 +84,114 @@ namespace CommandLauncher
             KillProcess();
         }
 
+        /// <summary>
+        /// 清扫历史遗留的孤儿 OCR 引擎进程（本修复上线前泄漏的、或 Job 挂入失败时泄漏的）。
+        /// 判定规则：ProcessName 以 "RapidOCR" 开头（OrdinalIgnoreCase），且其 exe 路径位于 EngineRoot
+        /// 目录之下（Path.GetFullPath 规范化后按目录边界前缀匹配）；跳过当前常驻进程；命中者整树 Kill +
+        /// Dispose，所有枚举到的 Process 对象最终都 Dispose。调用时机：App 启动时后台调用一次。绝不抛异常。
+        /// </summary>
+        public static void KillOrphanedEngines()
+        {
+            try
+            {
+                // 当前常驻进程 Id（进程已退出时读 Id 会抛异常，需 try/catch）
+                int currentPid = -1;
+                lock (_processLock)
+                {
+                    try
+                    {
+                        currentPid = _process?.Id ?? -1;
+                    }
+                    catch
+                    {
+                        // 忽略：常驻进程可能已退出
+                    }
+                }
+
+                string engineRoot = Path.GetFullPath(EngineRoot);
+                // 目录边界：结尾补分隔符，避免 /ocr-engine2 之类前缀被误判为引擎目录
+                string engineRootPrefix = engineRoot.EndsWith(Path.DirectorySeparatorChar)
+                    ? engineRoot
+                    : engineRoot + Path.DirectorySeparatorChar;
+
+                int killed = 0;
+                foreach (Process proc in Process.GetProcesses())
+                {
+                    try
+                    {
+                        if (!proc.ProcessName.StartsWith("RapidOCR", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        string? path;
+                        try
+                        {
+                            path = proc.MainModule?.FileName;
+                        }
+                        catch
+                        {
+                            // 权限不足 / 进程已退出，跳过该进程
+                            continue;
+                        }
+
+                        if (string.IsNullOrEmpty(path))
+                            continue;
+
+                        string full;
+                        try
+                        {
+                            full = Path.GetFullPath(path);
+                        }
+                        catch
+                        {
+                            continue;
+                        }
+
+                        if (!full.StartsWith(engineRootPrefix, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        // 防御：跳过当前常驻进程（Job 挂入失败时它仍被 _process 引用，不应误杀）
+                        if (proc.Id == currentPid)
+                            continue;
+
+                        try
+                        {
+                            if (!proc.HasExited)
+                            {
+                                proc.Kill(entireProcessTree: true);
+                                killed++;
+                            }
+                        }
+                        catch
+                        {
+                            // 忽略：进程可能已退出或权限不足
+                        }
+                    }
+                    catch
+                    {
+                        // 单个候选处理异常（如 ProcessName 访问失败）跳过，不影响其余清扫
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            proc.Dispose();
+                        }
+                        catch
+                        {
+                            // 忽略
+                        }
+                    }
+                }
+
+                if (killed > 0)
+                    Logger.LogInfo($"已清理 {killed} 个孤儿 OCR 引擎进程");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("清理孤儿 OCR 引擎进程失败", ex);
+            }
+        }
+
         // ---- 安装检测 ----
 
         /// <summary>返回缓存的引擎 exe 完整路径；缓存失效时重新探测。</summary>
@@ -239,6 +347,9 @@ namespace CommandLauncher
                 Logger.LogError($"启动增强 OCR 引擎失败：{exePath}", ex);
                 return null;
             }
+
+            // 挂入 Job 对象：主进程被强杀/崩溃时由内核兜底杀掉引擎子进程，防止孤儿累积（失败已记日志，降级靠下次启动清扫）
+            ChildProcessJob.TryAssign(process);
 
             // 后台清空 stderr，避免子进程 stderr 缓冲区写满被阻塞（内容仅记日志）
             _ = DrainStderrAsync(process);
