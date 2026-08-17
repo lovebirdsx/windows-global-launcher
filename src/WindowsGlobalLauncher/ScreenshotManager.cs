@@ -31,6 +31,9 @@ namespace CommandLauncher
         private const int ClipboardRetryCount = 3;
         private const int ClipboardRetryDelayMs = 50;
 
+        /// <summary>贴图热键接受的剪贴板文字长度上限（与剪贴板历史上限语义一致，超长跳过）。</summary>
+        private const int MaxPinTextLength = 50_000;
+
         /// <summary>截图会话是否进行中（重入保护，仅 UI 线程读写）。</summary>
         public static bool IsCapturing { get; private set; }
 
@@ -89,7 +92,8 @@ namespace CommandLauncher
         }
 
         /// <summary>
-        /// 把当前剪贴板中的图片钉为屏幕贴图（初始位置取鼠标光标处）。仅 UI 线程调用。
+        /// 把当前剪贴板内容钉为屏幕贴图（初始位置取鼠标光标处）：图片优先钉为图片贴图，
+        /// 无图片但有文字时钉为便签式文字贴图。仅 UI 线程调用。
         /// 截图会话进行中时改为「钉图当前选区」：F7 被全局钩子吞掉、不会到达遮罩窗口，
         /// 从这里转发给遮罩执行（等同点工具条 📌）。
         /// </summary>
@@ -101,26 +105,50 @@ namespace CommandLauncher
                 return;
             }
 
-            if (!Clipboard.ContainsImage())
-            {
-                Logger.LogInfo("剪贴板无图片，忽略贴图热键");
-                return;
-            }
-
-            BitmapSource? image = null;
-            if (!RunWithClipboardRetry(() => image = Clipboard.GetImage(), "读取剪贴板图片"))
-                return;
-            if (image == null)
-            {
-                Logger.LogWarning("剪贴板图片读取结果为 null，忽略贴图");
-                return;
-            }
-            if (!image.IsFrozen)
-                image.Freeze();
-
             var pos = System.Windows.Forms.Cursor.Position; // 物理像素（PerMonitorV2）
-            new PinWindow(image, pos).Show();
-            Logger.LogInfo($"已从剪贴板贴图：{image.PixelWidth}x{image.PixelHeight} @ ({pos.X},{pos.Y})");
+
+            // 图片优先：保留原有行为
+            if (Clipboard.ContainsImage())
+            {
+                BitmapSource? image = null;
+                if (!RunWithClipboardRetry(() => image = Clipboard.GetImage(), "读取剪贴板图片"))
+                    return;
+                if (image == null)
+                {
+                    Logger.LogWarning("剪贴板图片读取结果为 null，忽略贴图");
+                    return;
+                }
+                if (!image.IsFrozen)
+                    image.Freeze();
+
+                PinWindow.FromImage(image, pos);
+                Logger.LogInfo($"已从剪贴板贴图：{image.PixelWidth}x{image.PixelHeight} @ ({pos.X},{pos.Y})");
+                return;
+            }
+
+            // 无图片：有文字则钉为便签
+            if (!Clipboard.ContainsText())
+            {
+                Logger.LogInfo("剪贴板无图片也无文字，忽略贴图热键");
+                return;
+            }
+
+            string? text = null;
+            if (!RunWithClipboardRetry(() => text = Clipboard.GetText(), "读取剪贴板文字"))
+                return;
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                Logger.LogInfo("剪贴板文字为空或全空白，忽略贴图热键");
+                return;
+            }
+            if (text!.Length > MaxPinTextLength)
+            {
+                Logger.LogInfo($"剪贴板文字过长（{text.Length} 字符，上限 {MaxPinTextLength}），忽略贴图热键");
+                return;
+            }
+
+            PinWindow.FromText(text, pos);
+            Logger.LogInfo($"已从剪贴板贴出文本：{text.Length} 字符 @ ({pos.X},{pos.Y})");
         }
 
         /// <summary>截图会话结束分发。无论何种结果，finally 中都复位 IsCapturing。</summary>
@@ -145,7 +173,7 @@ namespace CommandLauncher
                         break;
 
                     case SnipAction.Pin:
-                        new PinWindow(result.Image!, result.PhysicalRect.Location).Show();
+                        PinWindow.FromImage(result.Image!, result.PhysicalRect.Location);
                         Logger.LogInfo($"已贴图：{result.PhysicalRect.Width}x{result.PhysicalRect.Height} @ ({result.PhysicalRect.X},{result.PhysicalRect.Y})");
                         break;
 
