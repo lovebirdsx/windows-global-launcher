@@ -15,6 +15,7 @@ namespace WindowsGlobalLauncher.Tests
         [InlineData("F12", 0x7B, false, false, false, false)]            // 允许不带修饰键（由调用方自行约束）
         [InlineData("Ctrl+Space", 0x20, true, false, false, false)]
         [InlineData("Shift+Tab", 0x09, false, false, true, false)]
+        [InlineData("Shift+F7", 0x76, false, false, true, false)]        // 默认绑定：切换贴图整体显示/隐藏
         public void TryParse_ValidHotKey_ParsesCorrectly(
             string hotKey, int expectedVk, bool ctrl, bool alt, bool shift, bool win)
         {
@@ -75,6 +76,8 @@ namespace WindowsGlobalLauncher.Tests
         [InlineData("VolumeDown")]
         [InlineData("ToggleMute")]
         [InlineData("volumeup")] // 动作名不区分大小写
+        [InlineData("TogglePinVisibility")]
+        [InlineData("togglepinvisibility")] // 动作名不区分大小写
         public void All_ContainsBuiltInActions(string actionName)
         {
             Assert.True(WindowActions.All.ContainsKey(actionName));

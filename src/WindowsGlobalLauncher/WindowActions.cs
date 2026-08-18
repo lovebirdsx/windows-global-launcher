@@ -33,6 +33,7 @@ namespace CommandLauncher
                 ["ShowClipboardHistory"] = () => App.ClipboardHistoryWindow?.ShowHistory(),
                 ["Screenshot"] = ScreenshotManager.StartCapture,
                 ["PinClipboard"] = ScreenshotManager.PinFromClipboard,
+                ["TogglePinVisibility"] = PinWindow.ToggleAllVisibility, // 切换所有贴图（图片贴图与文字便签）的显示/隐藏
             };
 
         /// <summary>

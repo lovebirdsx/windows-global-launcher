@@ -48,6 +48,7 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 * 左键拖动移动；滚轮缩放（10%~500%，光标为锚点）；`Ctrl+滚轮` 调透明度
 * 双击或 `Esc` 关闭；右键菜单：复制图像 / 保存为文件 / 缩放 100% / 关闭所有贴图
 * 文字贴图：滚轮滚动内容（`Ctrl+滚轮` 仍调透明度）、不支持缩放；右键菜单「编辑」修改文字（`Enter` 保存、`Shift+Enter` 换行、`Esc` 取消、点击别处自动保存），另有复制文本 / 保存为文件（txt）/ 关闭所有贴图
+* `Shift+F7` 隐藏/显示所有贴图（图片贴图与文字便签统一切换；整体隐藏时新钉一张贴图会连同旧贴图一起恢复显示）；托盘菜单「隐藏所有贴图/显示所有贴图」同效（无贴图时置灰）
 
 > 注意:默认热键是无修饰键的 `F4`/`F7`,命中后按键被全局吞掉——Excel 的 `F4`(重复上一操作/切换绝对引用)等应用内同名快捷键会失效。介意的话在配置中改绑其它组合键即可。
 
@@ -76,6 +77,7 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 | `Ctrl+Alt+C` | `ShowClipboardHistory` | 弹出剪贴板历史                   |
 | `F4`         | `Screenshot`           | 区域截图                         |
 | `F7`         | `PinClipboard`         | 把剪贴板内容钉为屏幕贴图（图片优先，无图片有文字则钉为便签）         |
+| `Shift+F7`   | `TogglePinVisibility`  | 隐藏/显示所有贴图（图片贴图与文字便签）                           |
 
 ## 运行
 
@@ -110,7 +112,8 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
     { "Action": "ToggleMute", "HotKey": "Win+F10", "Enabled": true },
     { "Action": "ShowClipboardHistory", "HotKey": "Ctrl+Alt+C", "Enabled": true },
     { "Action": "Screenshot", "HotKey": "F4", "Enabled": true },
-    { "Action": "PinClipboard", "HotKey": "F7", "Enabled": true }
+    { "Action": "PinClipboard", "HotKey": "F7", "Enabled": true },
+    { "Action": "TogglePinVisibility", "HotKey": "Shift+F7", "Enabled": true }
   ],
   "Commands": [
     {
@@ -126,7 +129,7 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 
 > `RunAsAdmin` 可选,默认 `false`:命令以普通用户权限启动(借用桌面 Shell 令牌降权)。设为 `true` 则保留管理员权限启动。降权失败(如 explorer 未运行)时会报错且不启动该命令。
 
-> `WindowActions` 可选,缺省时补默认绑定。`Action` 当前可用值:`CloseWindow`(关闭前台窗口)、`VolumeUp`/`VolumeDown`(增大/减小系统音量)、`ToggleMute`(切换静音)、`ShowClipboardHistory`(剪贴板历史)、`Screenshot`(区域截图)、`PinClipboard`(把剪贴板内容钉为屏幕贴图：图片优先，无图片有文字则钉为便签);`Enabled` 设为 `false` 可临时停用某条绑定。修饰键为精确匹配(如配置 `Alt+Q` 时 `Alt+Shift+Q` 不会触发)。
+> `WindowActions` 可选,缺省时补默认绑定。`Action` 当前可用值:`CloseWindow`(关闭前台窗口)、`VolumeUp`/`VolumeDown`(增大/减小系统音量)、`ToggleMute`(切换静音)、`ShowClipboardHistory`(剪贴板历史)、`Screenshot`(区域截图)、`PinClipboard`(把剪贴板内容钉为屏幕贴图：图片优先，无图片有文字则钉为便签)、`TogglePinVisibility`(隐藏/显示所有贴图);`Enabled` 设为 `false` 可临时停用某条绑定。修饰键为精确匹配(如配置 `Alt+Q` 时 `Alt+Shift+Q` 不会触发)。
 
 ## 开发
 

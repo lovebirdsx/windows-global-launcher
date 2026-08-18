@@ -423,12 +423,22 @@ namespace CommandLauncher
                 contextMenu.Items.Add("显示", null, (s, e) => ShowWindow());
                 contextMenu.Items.Add("截图", null, (s, e) => ScreenshotManager.StartCapture());
                 contextMenu.Items.Add("贴图 (剪贴板)", null, (s, e) => ScreenshotManager.PinFromClipboard());
+                var togglePinsItem = new System.Windows.Forms.ToolStripMenuItem("隐藏所有贴图");
+                togglePinsItem.Click += (s, e) => PinWindow.ToggleAllVisibility();
+                contextMenu.Items.Add(togglePinsItem);
                 contextMenu.Items.Add(BuildEyeCareMenu());
                 contextMenu.Items.Add("设定配置文件", null, (s, e) => AppConfig.SetConfigFile());
                 contextMenu.Items.Add("打开配置文件", null, (s, e) => AppConfig.OpenConfigFile());
                 contextMenu.Items.Add("打开日志文件", null, (s, e) => Logger.OpenLogFile());
                 contextMenu.Items.Add("退出", null, (s, e) => ExitApplication());
                 _notifyIcon.ContextMenuStrip = contextMenu;
+
+                // 打开托盘菜单时按当前状态刷新文案与可用性（热键切换的状态也能正确反映）
+                contextMenu.Opening += (s, e) =>
+                {
+                    togglePinsItem.Text = PinWindow.IsAllHidden ? "显示所有贴图" : "隐藏所有贴图";
+                    togglePinsItem.Enabled = PinWindow.OpenCount > 0;
+                };
 
                 _notifyIcon.DoubleClick += (s, e) => ShowWindow();
                 Logger.LogInfo("系统托盘图标设置成功");

@@ -31,6 +31,10 @@ namespace CommandLauncher
         // ---- 已打开贴图的静态跟踪（仅 UI 线程访问）：构造加入、Closed 移除 ----
         private static readonly List<PinWindow> _open = new();
 
+        // 贴图整体隐藏状态标记（仅 UI 线程访问）：HideAll 置位、ShowAll 复位；
+        // _open 清空时在 Closed 处理器中复位，维持不变式「_allHidden == true ⇒ _open 非空且全部隐藏」
+        private static bool _allHidden;
+
         // 描边画刷：常态白色半透明，鼠标悬停变蓝（冻结以便跨实例复用）
         private static readonly Brush NormalBorderBrush = Freeze(new SolidColorBrush(Color.FromArgb(90, 255, 255, 255)));
         private static readonly Brush HoverBorderBrush = Freeze(new SolidColorBrush(Color.FromRgb(0, 120, 212)));
@@ -204,7 +208,7 @@ namespace CommandLauncher
 
             Loaded += OnLoadedRecheckDpi;
             RegisterInOpenList($"图片 {image.PixelWidth}x{image.PixelHeight} 像素");
-            Show();
+            ShowInitially();
         }
 
         private PinWindow(string text, System.Drawing.Point physicalTopLeft)
@@ -279,7 +283,7 @@ namespace CommandLauncher
 
             Loaded += OnLoadedRecheckDpi;
             RegisterInOpenList($"文本 {text.Length} 字符");
-            Show();
+            ShowInitially();
         }
 
         /// <summary>当前已打开的贴图数量。</summary>
@@ -290,6 +294,49 @@ namespace CommandLauncher
         {
             foreach (var w in _open.ToArray())
                 w.Close();
+        }
+
+        /// <summary>贴图是否处于整体隐藏状态（托盘菜单文案/置灰用）。</summary>
+        public static bool IsAllHidden => _allHidden;
+
+        /// <summary>隐藏所有已打开贴图（窗口保留在 _open，Show 可恢复原位置/尺寸/透明度）。</summary>
+        public static void HideAll()
+        {
+            if (_open.Count == 0)
+            {
+                Logger.LogInfo("当前无贴图，无需隐藏");
+                return;
+            }
+            foreach (var w in _open.ToArray()) // 副本遍历，同 CloseAll 先例
+                w.Hide();
+            _allHidden = true;
+            Logger.LogInfo($"全部贴图已隐藏，共 {_open.Count} 个");
+        }
+
+        /// <summary>恢复显示所有被整体隐藏的贴图（含调用方新创建尚未显示的实例）。</summary>
+        public static void ShowAll()
+        {
+            _allHidden = false;
+            foreach (var w in _open.ToArray())
+                w.Show();
+            Logger.LogInfo($"全部贴图已恢复显示，共 {_open.Count} 个");
+        }
+
+        /// <summary>
+        /// 切换全部贴图的显示/隐藏：整体隐藏 → 全部恢复；否则全部隐藏。
+        /// 无贴图时忽略（仅记日志，不置状态）。
+        /// </summary>
+        public static void ToggleAllVisibility()
+        {
+            if (_open.Count == 0)
+            {
+                Logger.LogInfo("当前无贴图，忽略隐藏/显示切换");
+                return;
+            }
+            if (_allHidden)
+                ShowAll();
+            else
+                HideAll();
         }
 
         private static Brush Freeze(Brush brush)
@@ -341,9 +388,21 @@ namespace CommandLauncher
             Closed += (s, e) =>
             {
                 _open.Remove(this);
+                if (_open.Count == 0)
+                    _allHidden = false; // 贴图全部关闭后整体隐藏状态自然结束
                 Logger.LogInfo($"贴图已关闭：{contentDesc}，剩余 {_open.Count} 个");
             };
             Logger.LogInfo($"贴图已创建：{contentDesc}，初始位置 ({_initialPhysicalTopLeft.X}, {_initialPhysicalTopLeft.Y})（物理像素），当前共 {_open.Count} 个");
+        }
+
+        // 初始显示：整体隐藏状态下新钉贴图时，先恢复全部隐藏贴图——本窗此刻已在 _open，
+        // ShowAll 遍历列表把它一并显示（新贴图直接显示且旧贴图一起恢复）。
+        private void ShowInitially()
+        {
+            if (_allHidden)
+                ShowAll();
+            else
+                Show();
         }
 
         // Loaded 后按最终所在显示器的 DPI 校正一次：若与构造时不同，重算基准尺寸与初始位置
