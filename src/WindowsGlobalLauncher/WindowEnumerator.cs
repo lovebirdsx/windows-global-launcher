@@ -198,7 +198,14 @@ namespace CommandLauncher
 
                     BringWindowToTop(hwnd);
                     SetForegroundWindow(hwnd);
-                    ShowWindow(hwnd, SW_SHOW);
+                    // ShowWindow(SW_SHOW) 仅对不可见窗口调用：进程由带 STARTF_USESHOWWINDOW 的方式启动
+                    // （Start-Process、publish 脚本、双击均如此）时，该进程第一次调用 ShowWindow 的 nCmdShow
+                    // 会被系统替换为 STARTUPINFO 的 wShowWindow（通常 SW_SHOWNORMAL，MSDN ShowWindow 文档记载）
+                    // ——SW_SHOWNORMAL 会把最大化的目标窗口还原，且该替换只消耗一次（实测启动后首次 Activate 必现）。
+                    // Activate 的所有调用场景（切换器 Commit / 剪贴板粘贴回 / 截图归还前台）目标都是可见窗口，
+                    // SW_SHOW 本就多余，跳过即可彻底避开；最小化窗口已由上方 SW_RESTORE 分支处理。
+                    if (!IsWindowVisible(hwnd))
+                        ShowWindow(hwnd, SW_SHOW);
                 }
                 finally
                 {
@@ -210,7 +217,9 @@ namespace CommandLauncher
 
                 // 兜底：仍未到前台时，使用 Alt+Tab 内部 API
                 if (GetForegroundWindow() != hwnd)
+                {
                     SwitchToThisWindow(hwnd, true);
+                }
             }
             catch (Exception ex)
             {

@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -1085,6 +1086,22 @@ namespace CommandLauncher
                 return;
             _completed = true;
             Completed?.Invoke(result);
+        }
+
+        /// <summary>
+        /// 关闭进行中（遮罩仍全屏覆盖、尚未销毁）时归还截图前的前台窗口：此刻先把原窗口激活到
+        /// 遮罩之下，遮罩销毁时自身已非活动窗口，系统不会再自行挑窗口激活——消除「Close 后系统
+        /// 先激活错误窗口、HandleResult 的 finally 再跳回原窗口」的闪屏中间态。
+        /// OCR 动作除外（结果窗需要键盘焦点）；_pendingResult 为 null 的兜底取消路径（Alt+F4 等）
+        /// 也归还——非 Ocr 即归还。注意本窗口未订阅 Deactivated/失焦隐藏，这次提前失活无副作用。
+        /// </summary>
+        protected override void OnClosing(CancelEventArgs e)
+        {
+            if (_pendingResult?.Action != SnipAction.Ocr)
+            {
+                ScreenshotManager.RestorePreviousForeground();
+            }
+            base.OnClosing(e);
         }
 
         /// <summary>

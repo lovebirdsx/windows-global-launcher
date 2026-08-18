@@ -40,6 +40,15 @@ namespace CommandLauncher
         /// <summary>进行中的遮罩窗口（贴图热键转发用）；会话结束（HandleResult）时置空。</summary>
         private static ScreenshotOverlayWindow? _activeOverlay;
 
+        /// <summary>截图前的前台窗口句柄（会话结束时归还前台用）。</summary>
+        private static IntPtr _previousForeground = IntPtr.Zero;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindow(IntPtr hWnd);
+
         /// <summary>发起一次区域截图：冻结整个虚拟屏 → 弹出全屏遮罩交互选区。仅 UI 线程调用。</summary>
         public static void StartCapture()
         {
@@ -50,6 +59,9 @@ namespace CommandLauncher
             }
 
             IsCapturing = true;
+            // 记录截图前的前台窗口：遮罩弹出时会抢走前台（OnOverlayLoaded 里 Activate + Focus 以接收 Esc 等按键），
+            // 遮罩销毁前（OnClosing）据此把前台归还，避免系统随机挑窗口激活导致原前台窗口丢失。
+            _previousForeground = GetForegroundWindow();
             try
             {
                 var bounds = ScreenCapture.GetVirtualScreenBounds();
@@ -76,7 +88,8 @@ namespace CommandLauncher
                     }
                 }
                 Logger.LogInfo($"开始截图：虚拟屏 ({bounds.X},{bounds.Y}) {bounds.Width}x{bounds.Height}，护眼模式={EyeCareManager.CurrentModeName ?? "无"}"
-                    + (eyeCareSuspended ? "（抓屏期间已临时挂起）" : ""));
+                    + (eyeCareSuspended ? "（抓屏期间已临时挂起）" : "")
+                    + $"；弹出前前台窗口=0x{_previousForeground.ToInt64():X}");
 
                 var snapshot = WindowRectSnapshot.Capture(IntPtr.Zero);
                 var overlay = new ScreenshotOverlayWindow(frozen, bounds, snapshot);
@@ -194,7 +207,40 @@ namespace CommandLauncher
             {
                 _activeOverlay = null;
                 IsCapturing = false;
+
+                // 前台归还已由遮罩在销毁前（OnClosing）完成：此刻遮罩仍全屏覆盖，先把原窗口激活到
+                // 遮罩之下，遮罩销毁时自身已非活动窗口，系统不会再自行挑窗口激活——消除关闭后
+                // 「系统先激活错误窗口、再跳回原窗口」的闪屏中间态。这里仅作收尾：
+                // - OCR 动作会弹出结果窗（OcrResultWindow）需要键盘焦点，不归还，直接清空句柄；
+                // - 其余动作正常路径下 OnClosing 已归还并置空句柄，再调 RestorePreviousForeground
+                //   是幂等空操作，仅当遮罩被异常关闭、未走 OnClosing 归还时才真正生效（兜底）。
+                if (result.Action == SnipAction.Ocr)
+                {
+                    _previousForeground = IntPtr.Zero;
+                }
+                else
+                {
+                    RestorePreviousForeground();
+                }
             }
+        }
+
+        /// <summary>
+        /// 归还截图前的前台窗口（幂等）。遮罩在销毁前（OnClosing）调用一次，正常路径下前台在
+        /// 遮罩关闭前就已恢复；HandleResult 的 finally 作为兜底再调一次时，_previousForeground
+        /// 已被置空，方法直接无事发生。OCR 动作不调用本方法（结果窗需要焦点），由 HandleResult
+        /// 直接清空句柄。
+        /// </summary>
+        internal static void RestorePreviousForeground()
+        {
+            if (_previousForeground != IntPtr.Zero && IsWindow(_previousForeground))
+            {
+                WindowEnumerator.Activate(_previousForeground);
+                Logger.LogInfo($"截图会话结束，恢复前台窗口: 0x{_previousForeground.ToInt64():X}");
+            }
+
+            // 无论是否恢复都置空，保证幂等（第二次调用无事发生）且不残留句柄影响下次截图。
+            _previousForeground = IntPtr.Zero;
         }
 
         /// <summary>
