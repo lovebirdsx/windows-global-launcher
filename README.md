@@ -1,6 +1,8 @@
 # Windows Global Launcher
 
-常驻系统托盘的 Windows 桌面工具,包含五个相互独立的功能:命令启动器、Alt+Tab 窗口切换器、剪贴板历史、截图与贴图、护眼模式。平时隐藏在后台,靠全局热键唤出。
+常驻系统托盘的 Windows 桌面工具,包含六个相互独立的功能:命令启动器、Alt+Tab 窗口切换器、剪贴板历史、截图与贴图、护眼模式、自动更新。平时隐藏在后台,靠全局热键唤出。
+
+[![CI](https://github.com/lovebirdsx/windows-global-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/lovebirdsx/windows-global-launcher/actions/workflows/ci.yml)
 
 ## 功能
 
@@ -64,6 +66,10 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 * 通过 Magnification 全屏颜色矩阵实现（不依赖显卡 gamma 支持，HDR/新驱动下也能用）
 * 当前模式自动保存，程序启动时恢复，退出时还原
 
+### 自动更新
+
+程序启动后自动在后台检查更新（每天最多一次），发现新版本时弹窗提示版本号与更新日志，可一键下载、替换并重启（详见下文「更新」章节）。
+
 ### 窗口动作热键
 
 全局生效的热键，在配置文件的 `WindowActions` 段自定义，修改配置后自动热更新。默认绑定：
@@ -78,6 +84,25 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 | `F4`         | `Screenshot`           | 区域截图                         |
 | `F7`         | `PinClipboard`         | 把剪贴板内容钉为屏幕贴图（图片优先，无图片有文字则钉为便签）         |
 | `Shift+F7`   | `TogglePinVisibility`  | 隐藏/显示所有贴图（图片贴图与文字便签）                           |
+
+## 安装
+
+从 [GitHub Releases](https://github.com/lovebirdsx/windows-global-launcher/releases/latest) 下载 `WindowsGlobalLauncher-vX.Y.Z-win-x64.zip`，解压到任意目录。
+
+* **首次使用请双击 `Start.cmd`**：它会自动检测并静默安装 .NET 8 桌面运行时（未安装时约 55MB），然后启动程序。建议优先使用此方式。
+* 已安装 .NET 8 桌面运行时，可直接双击 `WindowsGlobalLauncher.exe` 启动。
+* 程序需要管理员权限（用于全局键盘钩子与窗口切换），启动时若弹出 UAC 提示请选择「是」。
+* 下载包可用同名 `.sha256` 文件校验完整性，在 PowerShell 中运行：
+
+```powershell
+Get-FileHash WindowsGlobalLauncher-vX.Y.Z-win-x64.zip -Algorithm SHA256
+```
+
+## 更新
+
+* 程序启动后会在后台检查更新（每天最多一次），发现新版本时弹窗显示版本号与更新日志；点「立即更新」自动下载、校验、替换并重启，也可选「稍后」或「跳过此版本」。
+* 随时可通过托盘菜单「检查更新」，或在命令面板输入 `update` 手动检查（手动检查忽略每日节流与「跳过此版本」）。
+* 若程序装在无写权限的目录（如受系统保护的 Program Files），自动更新会提示手动下载；可将程序移动到有写权限的目录后重试。
 
 ## 运行
 
@@ -97,6 +122,7 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 | `config`    | 打开配置文件        |
 | `setconfig` | 选择 / 切换配置文件 |
 | `logs`      | 查看日志            |
+| `update`    | 检查更新            |
 | `exit`      | 退出程序            |
 
 ### 配置文件示例
@@ -140,3 +166,12 @@ dotnet build        # 编译
 dotnet test         # 运行单元测试
 .\scripts\publish.ps1   # 发布并启动(PowerShell)
 ```
+
+发布流程：更新 `src/WindowsGlobalLauncher/WindowsGlobalLauncher.csproj` 中的 `<Version>` → 提交 → 打 tag 并推送：
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+推送 tag 后 GitHub Actions（`.github/workflows/release.yml`）会自动构建、跑测试、打包并创建 Release（附 zip 与 sha256，release notes 自动生成）。

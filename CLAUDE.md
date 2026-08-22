@@ -6,15 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含五个相互独立的功能：
+Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含六个相互独立的功能：
 
 1. **命令启动器**（`MainWindow`）：全局热键（默认 `Ctrl+Shift+I`）弹出的搜索式命令面板，从 JSON 配置读取命令并通过 `Process.Start` 执行。
 2. **Alt+Tab 窗口切换器**（`SwitcherWindow`）：接管系统 Alt+Tab，竖向列出当前窗口（图标 + 标题）供切换。
 3. **剪贴板历史**（`ClipboardWindow` + `ClipboardHistoryManager`）：后台记录系统复制历史（文本 + 图片），热键（默认 `Ctrl+Alt+C`）弹出紧凑历史面板，回车粘贴回原窗口。
 4. **截图与贴图**（`ScreenshotManager` + `ScreenshotOverlayWindow` + `PinWindow`）：Snipaste 式区域截图（默认 `F4`，框选/窗口吸附/标注/取色，确认后复制到剪贴板或 OCR 识别选区文字）与屏幕贴图（默认 `F7`，剪贴板图片钉为图片贴图，无图片有文字时钉为便签式文字贴图）；`Shift+F7` 整体隐藏/显示所有贴图（新钉贴图自动退出整体隐藏状态）。
 5. **护眼模式**（`EyeCareManager`）：内置「正常」「办公」两种色温/亮度模式，经命令启动器（搜「护眼」）或托盘菜单选择，通过 Magnification 全屏颜色矩阵生效。
+6. **自动更新**（`UpdateChecker` + `UpdateInstaller` + `UpdateCoordinator` + `UpdateWindow`）：启动后延迟后台检查 GitHub Release（每天最多一次），发现新版本弹窗提示，一键下载校验、自替换 exe 并重启。
 
-前三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出；截图/贴图为静态类无常驻窗口，由 `WindowActions` 热键或托盘菜单按需触发；护眼模式无独立窗口，启动时恢复上次选择。
+前三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出；截图/贴图为静态类无常驻窗口，由 `WindowActions` 热键或托盘菜单按需触发；护眼模式无独立窗口，启动时恢复上次选择；自动更新在 `App.OnStartup` 末尾 fire-and-forget 后台检查，仅发现新版本时弹提示窗（`UpdateWindow`），无常驻窗口。
 
 ## 常用命令
 
@@ -25,6 +26,8 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 ```
 
 发布与本地运行用 PowerShell 脚本（`scripts/publish.ps1`）：会先 `Stop-Process` 掉正在运行的实例，`dotnet publish` 出单文件 exe（`-r win-x64 --self-contained false`，依赖已装 .NET 8 运行时）到 `dist/`，再启动它。
+
+正式发版走 CI：推送 `v1.2.3` 形式的 tag 即触发 `.github/workflows/release.yml` 自动跑单元测试、发布单文件 exe（用 `-p:Version=<tag 去 v 前缀>` 覆盖版本号）并创建 GitHub Release（附 zip 与 sha256，release notes 自动生成）；`scripts/publish.ps1` 仅用于本地开发运行。
 
 **运行需要管理员权限**：`app.manifest` 声明 `requireAdministrator`（见下文「键盘钩子与权限」），因此直接 `dotnet run` 会触发 UAC。
 
@@ -112,6 +115,30 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - **颜色效果跨进程残留**：程序退出后矩阵仍生效，因此 `App.OnStartup` 先还原再恢复上次模式（`RestoreLastMode`），`App.OnExit` 必调 `ResetEffect`。
 - **模式表内置固定**（参数对照 CareUEyes 官方文档，取日间值；仅保留「正常」「办公」两种）：改模式改 `EyeCareManager.Modes` 一处即可，命令注入/托盘子菜单/持久化都自动跟随。旧版本持久化的已删除模式名（如「智能」）在 `RestoreLastMode` 中找不到对应模式，自然回退为不应用。
 - **交互**：与 `config` 等内置命令同机制——`RefreshCommandList` 注入「护眼：xxx」、`ExecuteAppCommand` 分发；托盘「护眼模式」子菜单在 `DropDownOpening` 时按 `EyeCareManager.CurrentModeName` 刷新勾选。当前模式名持久化在 `AppState`（`GetEyeCareMode`/`SetEyeCareMode`）。
+
+## 自动更新与发布实现要点
+
+涉及文件：`UpdateChecker.cs`（UpdateInfo/UpdateCheckResult 模型 + GitHub API 查询 + 版本比较 + 节流/跳过状态）、`UpdateInstaller.cs`（下载/校验/解压/自替换重启/残留清理）、`UpdateCoordinator.cs`（自动/手动两种检查策略编排）、`UpdateWindow.cs`（更新提示窗）、`StartupArgs.cs`（命令行参数统一解析）、`App.cs`（版本号读取 + OnStartup 末尾 fire-and-forget 检查）、`Program.cs`（Main 收参/等旧进程/清理残留）、`AppState.cs`（LastUpdateCheckUtc/SkippedUpdateVersion）、`MainWindow.cs`（内置命令 `update` + 托盘菜单）、`.github/workflows/ci.yml`、`.github/workflows/release.yml`、`scripts/dist/*`。
+
+- **版本号单一来源**：csproj `<Version>` 是唯一真相源（当前 `1.0.0`），CI 发布时用 `-p:Version=<tag 去 v 前缀>` 覆盖（见 release.yml）。运行期 `App.AppVersionString` 读 `AssemblyInformationalVersionAttribute` 并按 `+` 截断 commit hash——**不能用 `Assembly.Location`/`FileVersionInfo`：`PublishSingleFile` 下 `Assembly.Location` 为空串**；特性缺失回退 `GetName().Version`，再失败回退 `"0.0.0"`（版本号读取绝不抛异常、不能影响启动）。
+- **版本比较陷阱**：`System.Version` 里 `1.2.3`（Revision=-1）与 `1.2.3.0`（Revision=0）不相等且后者更大，直接比较会在三段/四段混用时误判。故 `UpdateChecker.CompareVersion`（私有）只比 Major/Minor/Build 且把负 Build 归零；`IsNewerThanCurrent`/`IsSkipped` 都走它，其余版本比较不要再手写。
+- **命令行参数统一解析（重要坑）**：原先 `MainWindow` 直接把 `Environment.GetCommandLineArgs()[1]` 当配置文件路径；自动更新重启要传 `--wait-for-pid <pid>`，会被误当配置路径。现一律经 `StartupArgs.Parse`（`Program.Main` 最开始调用一次），`MainWindow` 改读 `StartupArgs.ConfigPath`。**新增命令行参数只改 `StartupArgs` 一处**，不要再在别处直接读 `GetCommandLineArgs`（未知 `--` 参数会被 `Parse` 忽略，避免误当配置路径）。
+- **发布产物命名是客户端更新的契约**：`WindowsGlobalLauncher-v<ver>-win-x64.zip` + 同名 `.sha256`（release.yml 生成）；`UpdateChecker.SelectAsset` 按此挑资产——精确名优先，退而取第一个「含 `win-x64` 的 zip」。**改 workflow 里的命名必须同步改 `UpdateChecker` 的资产选择逻辑**，否则客户端找不到包。
+- **检查策略**：端点 `api.github.com/repos/lovebirdsx/windows-global-launcher/releases/latest`，**必须带 User-Agent 否则 GitHub 返回 403**；**不对 API 做镜像回退**（ghfast.top/gh-proxy.com 只可靠代理资产下载，不代理 API），镜像仅用于下载（`UpdateInstaller.BuildMirrorUrls`）。启动后延迟 30s 再查（避开启动高峰与开机网络未就绪），每天最多一次（`AppState.LastUpdateCheckUtc`，`ShouldAutoCheck` 按 24h 判定，时钟回拨视为允许检查）；**限流（403/429）也写检查时间戳**避免反复撞墙、普通网络失败不写以便下次重试。`draft`/`prerelease` 视为「无可用更新」而非错误；手动检查忽略节流与「跳过此版本」且无论结果如何都给用户反馈（无更新也弹「已是最新版本」）。
+- **自替换机制（核心不变式）**：Windows 允许重命名正在运行的 exe（只改目录项，已打开的映像句柄仍指向同一文件）但不允许删除/覆盖它。流程：「写权限预检（`CanWriteToDirectory` 建临时文件探测，Program Files 等无权限场景在下载前就挡掉）→ ① 新 exe `File.Copy` 到同目录的 `exe.new` → ② 旧 exe 改名 `.old` → ③ `File.Move(exe.new → exe)` → ④ 启动新进程 → 旧进程 `Shutdown` → 新进程删 `.old`」。**先复制到 `.new` 再 rename 落位，不能直接 `File.Copy` 到 exePath**：CopyFile 中途失败（磁盘满 / I/O 错误 / 杀软拦截）不保证清理目标文件，会在原路径留下一个损坏的 exe——那时既回滚不了（原路径已被占），损坏的 exe 若还能启动还会由 `CleanupLeftovers` 把唯一可用的 `.old` 备份删掉，彻底变砖。改成「复制 + 两次同卷 rename」后，危险窗口只剩 rename，不存在部分写入的中间态。每步失败都回滚，**绝不留下「旧的已改名、新的没落位」的半残局面**；`.old` 被占用时依次尝试 `.old1`~`.old9`。
+- **回滚必须无条件**：`RollbackRename` 先无条件删掉 exePath 上可能存在的残留、再把备份搬回，**不要加「exePath 不存在才回滚」这类前置条件**——一旦某个失败路径在原路径留下半个文件，回滚就会被静静跳过（即上一条说的变砖路径）。
+- **`.old` 残留清理用精确白名单**：`CleanupLeftovers` 遍历 `EnumerateBackupCandidates`（`.old` + `.old1`~`.old9`，与生成备份名共用同一份定义），**不能用 `Directory.GetFiles(dir, name + ".old*")`**：通配的 `*` 会匹配任意后缀（含点号），把用户自己放在同目录的 `WindowsGlobalLauncher.exe.old.bak` 之类文件永久删除。同时清理未落位的 `exe.new`。
+- **新旧进程并存的资源冲突**：新进程带 `--wait-for-pid <旧 pid>`，在 `Program.Main` 里 `new App()` **之前**同步等待旧进程退出（上限 15s，超时也继续启动并记 WARN），否则会撞上 RegisterHotKey 失败、低级键盘钩子重复安装、双托盘图标、旧进程 `OnExit` 的 `ResetEffect` 抹掉新进程刚设的护眼矩阵。等待前**先核对进程名**：pid 会被系统复用，旧进程若已退出且 pid 被分配给了无关的长命进程，不校验就会白等满 15 秒拖慢启动。
+- **进程启动方式**：当前进程已是管理员，`UseShellExecute=false` + `ArgumentList` 启动同样 requireAdministrator 的 exe 不会弹 UAC；仅在收到 `ERROR_ELEVATION_REQUIRED`(740) 时才回退 `UseShellExecute=true` + `Verb=runas`（那条路径不支持 `ArgumentList`，只能 `BuildQuotedArguments` 手工拼引号）。
+- **校验值拿不到就拒绝安装，不降级**：优先用 GitHub 资产的 `digest` 字段（`sha256:<hex>`，取冒号后小写 hex；只接受 64 位小写 hex，格式异常返回空串让调用方走下一档而非拿坏值比对导致更新永远失败）——它来自 `api.github.com` 直连响应，是整条链路里唯一未经镜像中转的可信锚点；取不到才下载同名 `.sha256` 资产（sha256sum 风格取第一个空白分隔字段，同样直连优先，取自镜像时记 WARN 说明信任降级）。**两者都拿不到时拒绝自动安装并引导手动下载**，刻意不降级为仅体积校验：更新包要拿管理员权限直接替换自身可执行文件，做一个体积相同的替换品毫无难度，仅体积校验等同于没有校验；而 release.yml 保证每个 zip 都带 `.sha256`、GitHub 也会自动生成 digest，两者同时缺失只可能是异常情况。
+- **下载中退出程序的协作**：`UpdateWindow.OnClosing` 在下载态 `e.Cancel = true`（拦「用户误关窗口」），但同一条路径也会把 `Application.Shutdown()` 挡下来。而 `MainWindow.ExitApplication` 是**先 `Dispose`（移除托盘图标、注销热键与钩子）再 `Shutdown`**，Shutdown 一旦被取消，程序就停在「没有托盘图标、没有热键、也退不掉」的半死状态。故 `ExitApplication` 里：`UpdateInstaller.IsBusy` 时先弹确认框，用户坚持退出则调 `UpdateWindow.PrepareForApplicationShutdown()` 放行拦截。**给窗口加「拒绝关闭」逻辑时都要想一遍应用级退出这条路径。**
+- **zip 用内置 `System.IO.Compression.ZipFile`**：SharpCompress 只为 7z（OCR 引擎包）引入，更新包是 zip，勿混用。
+- **不引入单实例 Mutex**：`--wait-for-pid` 已覆盖更新场景的新旧并存问题；「用户重复双击起两个实例」是独立的既有问题，不在此功能范围。
+- **AppState 加字段**：`AppState` 走 `JsonSerializer`（内部 `State` 类），加字段只改 `State` 类 + getter/setter 即可，**区别于 `AppConfig.SaveConfig` 那套手写 JSON 拼接**（那里加字段必须同步改拼接代码）。本功能新增 `LastUpdateCheckUtc`/`SkippedUpdateVersion` 两字段。注意 `AppState` 以整文件覆写方式持久化、本身不做并发保护，故**更新检查在后台线程拿到结果后要经 `UpdateCoordinator.MarkCheckedOnUiThread` 切回 UI 线程再写**，避免与 UI 线程的其它 `SaveState` 撞车。
+- **内置命令 `update`**：与 `config`/`logs` 同机制，四处——`AppCommands` 数组、`RefreshCommandList` 注入命令项、`ExecuteAppCommand` 分支（`_ = UpdateCoordinator.RunManualCheckAsync()`，网络操作 fire-and-forget），另加托盘菜单「检查更新」一处。新增内置命令照此四处改。
+- **release.yml 的两条硬约束**：① tag 名与手动输入是外部可控字符串，**必须经 `env:` 传进 pwsh 脚本**，不能用 `'${{ ... }}'` 直接插值——插值发生在脚本执行之前，带引号或换行的 tag 名会闭合字符串并执行任意 PowerShell；② 版本号正则严格三段 `^\d+\.\d+\.\d+$`，与客户端 `CompareVersion` 忽略第四段的口径一致——放行四段会让 `v1.2.3` 与 `v1.2.3.1` 被判为同一版本，用户永远收不到后者的更新提示。
+- **`scripts/dist/Start.ps1` 用 `$env:ProgramW6432` 而非 `$env:ProgramFiles`** 定位 .NET 运行时目录：32 位 PowerShell 宿主下后者指向 `Program Files (x86)`，而 x64 运行时装在 `Program Files`，会误判为未安装并重复下载安装。
+- **`.gitignore` 的 `dist` 必须写成 `/dist`**：无锚点的 `dist` 会连 `scripts/dist/`（打包进 zip 的启动脚本）一起忽略，导致 CI 组装 staging 目录失败。
 
 ## 日志
 

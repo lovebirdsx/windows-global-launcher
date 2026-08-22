@@ -94,6 +94,12 @@ namespace CommandLauncher
             WriteLog("ERROR", fullMessage);
         }
 
+        /// <summary>无异常对象的错误：用于「状态判定出错」而非「捕获到异常」的场合（如回滚时发现备份文件已不存在）。</summary>
+        public static void LogError(string message)
+        {
+            WriteLog("ERROR", message);
+        }
+
         private static void WriteLog(string level, string message)
         {
             try

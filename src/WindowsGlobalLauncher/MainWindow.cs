@@ -131,7 +131,7 @@ namespace CommandLauncher
     // 主窗口
     public class MainWindow : Window, IDisposable
     {
-        private static readonly string[] AppCommands = ["config", "setconfig", "logs", "exit"];
+        private static readonly string[] AppCommands = ["config", "setconfig", "logs", "update", "exit"];
 
         private readonly ObservableCollection<Command> _filteredCommands = [];
         private readonly HotKeyListener _hotKeyListener = new();
@@ -146,9 +146,8 @@ namespace CommandLauncher
 
         public MainWindow()
         {
-            // 支持命令行指定配置文件路径
-            var args = Environment.GetCommandLineArgs();
-            _configPath = args.Length > 1 ? args[1] : "config.json";
+            // 支持命令行指定配置文件路径（参数统一由 StartupArgs 解析，勿直接读 GetCommandLineArgs）
+            _configPath = StartupArgs.ConfigPath ?? "config.json";
 
             Logger.LogInfo($"开始初始化主窗口，配置文件: {_configPath}");
             InitializeComponent();
@@ -430,6 +429,7 @@ namespace CommandLauncher
                 contextMenu.Items.Add("设定配置文件", null, (s, e) => AppConfig.SetConfigFile());
                 contextMenu.Items.Add("打开配置文件", null, (s, e) => AppConfig.OpenConfigFile());
                 contextMenu.Items.Add("打开日志文件", null, (s, e) => Logger.OpenLogFile());
+                contextMenu.Items.Add("检查更新", null, (s, e) => _ = UpdateCoordinator.RunManualCheckAsync());
                 contextMenu.Items.Add("退出", null, (s, e) => ExitApplication());
                 _notifyIcon.ContextMenuStrip = contextMenu;
 
@@ -620,6 +620,15 @@ namespace CommandLauncher
                 Shell = "logs",
                 LastExecuted = AppState.Instance.GetCommandLastExecutedTime("logs"),
                 ExecuteCount = AppState.Instance.GetCommandExecuteCount("logs")
+            });
+
+            commands.Add(new Command
+            {
+                Name = "update",
+                Description = "检查windows-global-launcher的新版本",
+                Shell = "update",
+                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("update"),
+                ExecuteCount = AppState.Instance.GetCommandExecuteCount("update")
             });
 
             commands.Add(new Command
@@ -817,6 +826,11 @@ namespace CommandLauncher
                 {
                     Logger.OpenLogFile();
                 }
+                else if (selectedCommand.Name == "update")
+                {
+                    // 手动检查更新是网络操作，fire-and-forget；结果由 UpdateCoordinator 自行弹窗反馈
+                    _ = UpdateCoordinator.RunManualCheckAsync();
+                }
                 else if (selectedCommand.Name == "exit")
                 {
                     ExitApplication();
@@ -990,6 +1004,22 @@ namespace CommandLauncher
 
         private void ExitApplication()
         {
+            // 更新下载/安装进行中时先跟用户确认：此刻强退会中断下载，极小概率还会打断 exe 替换。
+            // 用户坚持退出的话必须真能退出——所以随后要放行 UpdateWindow 的关闭拦截，
+            // 否则下面 Dispose 已经摘掉托盘图标与热键，Shutdown 却被那个拦截取消，程序会陷入无入口的半死状态。
+            if (UpdateInstaller.IsBusy)
+            {
+                var choice = MessageBox.Show(
+                    "更新正在进行中，现在退出会中断更新。确定退出吗？",
+                    "退出", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (choice != MessageBoxResult.Yes)
+                    return;
+
+                Logger.LogWarning("用户在更新进行中选择退出程序");
+            }
+
+            UpdateWindow.PrepareForApplicationShutdown();
+
             Logger.LogInfo("程序正在退出");
             Dispose();
             Application.Current.Shutdown();

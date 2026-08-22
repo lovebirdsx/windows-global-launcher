@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Reflection;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
@@ -8,7 +9,12 @@ namespace CommandLauncher
 {
     public class App : Application
     {
-        public static readonly Version AppVersion = new(1, 0, 0, 0);
+        /// <summary>版本号字符串（形如 "1.2.3"），唯一来源是 csproj 的 &lt;Version&gt;，发布时由 CI 按 git tag 覆盖。</summary>
+        public static readonly string AppVersionString = ReadAppVersionString();
+
+        /// <summary>版本号（由 <see cref="AppVersionString"/> 解析），用于与 GitHub Release 的 tag 比较。</summary>
+        public static readonly Version AppVersion = ParseVersion(AppVersionString);
+
         public static readonly string AppName = "WindowsCommandLauncher";
         public static readonly string BaseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".windows-global-launcher");
 
@@ -69,6 +75,21 @@ namespace CommandLauncher
                     }
                 }
             }
+
+            // 启动后台检查更新（fire-and-forget，不打扰：每天最多检查一次，只有发现更高版本才弹窗）
+            _ = CheckUpdateAsync();
+
+            async Task CheckUpdateAsync()
+            {
+                try
+                {
+                    await UpdateCoordinator.RunStartupCheckAsync();
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning($"启动检查更新异常：{ex.Message}");
+                }
+            }
         }
 
         protected override void OnExit(ExitEventArgs e)
@@ -89,6 +110,41 @@ namespace CommandLauncher
             _switcherWindow?.Dispose();
             ClipboardHistoryManager.Instance.Dispose();
             base.OnExit(e);
+        }
+
+        /// <summary>
+        /// 读取程序集的 InformationalVersion 作为版本号字符串。
+        /// 单文件发布（PublishSingleFile）下 <c>Assembly.Location</c> 为空串，只能走程序集特性而非文件版本信息；
+        /// 引入 SourceLink 后该值会带 "+commitHash" 后缀，故按 '+' 截断。
+        /// 特性缺失时回退程序集版本，再失败回退 "0.0.0"（不抛异常，版本号读取绝不能影响启动）。
+        /// </summary>
+        private static string ReadAppVersionString()
+        {
+            try
+            {
+                var info = typeof(App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+                if (!string.IsNullOrWhiteSpace(info))
+                {
+                    int plus = info.IndexOf('+');
+                    return plus >= 0 ? info[..plus] : info;
+                }
+
+                var assemblyVersion = typeof(App).Assembly.GetName().Version;
+                if (assemblyVersion != null)
+                    return assemblyVersion.ToString(3);
+            }
+            catch
+            {
+                // 读取版本号失败不应影响启动，回退到下面的默认值
+            }
+
+            return "0.0.0";
+        }
+
+        /// <summary>解析版本号字符串，失败回退 0.0.0（视为「未知版本」，比任何正式版本都小）。</summary>
+        private static Version ParseVersion(string text)
+        {
+            return Version.TryParse(text, out var version) ? version : new Version(0, 0, 0);
         }
 
         /// <summary>注册全局未处理异常处理器，统一写日志，避免异常静默丢失导致排查困难。</summary>

@@ -1,0 +1,124 @@
+name: Release
+
+# 触发条件：
+#   1. 推送 v* 形式的 tag（如 v1.2.3），打 tag 后自动发版
+#   2. 手动触发 workflow_dispatch，输入版本号（形如 1.2.3），用于不打 tag 试跑
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本号（形如 1.2.3）'
+        required: true
+        default: '1.0.0'
+
+# 发版需要向仓库写入 Release 与 tag
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      # 1. 检出代码（fetch-depth: 0 拉取完整历史，便于自动生成 release notes）
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # 2. 解析版本号：tag 触发时从 ref_name 去掉前导 v（v1.2.3 -> 1.2.3），
+      #    workflow_dispatch 时取输入。结果写入 GITHUB_OUTPUT 供后续步骤引用。
+      #
+      #    注意：tag 名与手动输入都是外部可控字符串，**必须经 env 传进 shell**，
+      #    不能用 '${{ ... }}' 直接插值到脚本文本里——插值发生在脚本执行之前，
+      #    带引号或换行的 tag 名会闭合字符串并把后面的内容当成 PowerShell 语句执行。
+      - name: 解析版本号
+        id: version
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $version = $env:INPUT_VERSION
+            $tag = "v$version"
+          } else {
+            $refName = $env:REF_NAME
+            $version = $refName -replace '^v', ''
+            $tag = $refName
+          }
+          # 严格三段版本号：与客户端的版本比较口径一致（UpdateChecker.CompareVersion 只比 Major/Minor/Build，
+          # 忽略第四段），放行四段会让 v1.2.3 与 v1.2.3.1 被判定为同一版本，用户永远收不到后者的更新提示。
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Error "版本号格式非法：$version（应为 1.2.3 这样的三段版本号）"
+            exit 1
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "解析版本：$version，tag：$tag"
+
+      # 3. 发版前运行单元测试，失败即中止
+      - name: 运行单元测试
+        run: dotnet test WindowsGlobalLauncher.sln -c Release
+
+      # 4. 发布单文件 exe（与 scripts/publish.ps1 的发布命令一致，
+      #    并额外用 -p:Version 覆盖 csproj 中的版本号）
+      - name: 发布
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: dotnet publish src/WindowsGlobalLauncher/WindowsGlobalLauncher.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:Version=$env:VERSION -o publish
+        shell: pwsh
+
+      # 5. 组装 staging 目录：只拷 exe（publish 目录里可能还有 .pdb，不打包），
+      #    加上 scripts/dist 下的兜底启动脚本与说明
+      - name: 组装 staging 目录
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Copy-Item -Path 'publish/WindowsGlobalLauncher.exe' -Destination 'staging/' -Force
+          Copy-Item -Path 'scripts/dist/Start.cmd' -Destination 'staging/' -Force
+          Copy-Item -Path 'scripts/dist/Start.ps1' -Destination 'staging/' -Force
+          Copy-Item -Path 'scripts/dist/README-first.txt' -Destination 'staging/' -Force
+
+      # 6. 打包 zip（命名契约：WindowsGlobalLauncher-v<ver>-win-x64.zip）
+      - name: 打包
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $zipName = "WindowsGlobalLauncher-v$env:VERSION-win-x64.zip"
+          Compress-Archive -Path 'staging/*' -DestinationPath $zipName
+          Write-Host "已生成：$zipName"
+
+      # 7. 生成 SHA256 校验文件（格式：<小写hash><两个空格><zip 文件名>，
+      #    兼容 sha256sum 风格，hash 必须在最前——客户端 UpdateInstaller.TryFetchSha256Async 只取第一个字段）
+      - name: 生成 SHA256 校验文件
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $zipName = "WindowsGlobalLauncher-v$env:VERSION-win-x64.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 $zipName).Hash.ToLowerInvariant()
+          "$hash  $zipName" | Out-File -FilePath "$zipName.sha256" -Encoding ascii
+          Get-Content "$zipName.sha256"
+
+      # 8. 创建 Release 并上传 zip 与 .sha256 两个产物
+      #    说明：workflow_dispatch 手动试跑时 tag 可能不存在，
+      #    action-gh-release 会按 tag_name 自动创建该 tag（指向当前 HEAD）。
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.version }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          files: |
+            WindowsGlobalLauncher-v${{ steps.version.outputs.version }}-win-x64.zip
+            WindowsGlobalLauncher-v${{ steps.version.outputs.version }}-win-x64.zip.sha256
+          generate_release_notes: true

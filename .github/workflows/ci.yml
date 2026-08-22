@@ -1,0 +1,46 @@
+name: CI
+
+# 触发条件：推送到 main 分支，或向 main 分支发起 Pull Request
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # 1. 检出代码
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 2. 安装 .NET 8 SDK
+      - name: 安装 .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # 3. 缓存 NuGet 包以加速构建
+      #    项目没有 packages.lock.json，因此用所有 csproj 的哈希作为缓存键，
+      #    任一 csproj 变更（含依赖变动）都会使缓存失效。
+      - name: 缓存 NuGet 包
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      # 4. 还原依赖
+      - name: 还原依赖
+        run: dotnet restore WindowsGlobalLauncher.sln
+
+      # 5. 编译 Release 配置
+      - name: 编译
+        run: dotnet build WindowsGlobalLauncher.sln -c Release --no-restore
+
+      # 6. 运行全部单元测试（xUnit）
+      - name: 运行单元测试
+        run: dotnet test WindowsGlobalLauncher.sln -c Release --no-build

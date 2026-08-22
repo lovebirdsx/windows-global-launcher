@@ -26,6 +26,10 @@ namespace CommandLauncher
             public string AnnotationStrokeColor { get; set; } = "#FF4040";
             public double AnnotationStrokeWidth { get; set; } = 3.0;
             public double AnnotationTextFontSize { get; set; } = 16.0;
+            // 上次检查更新的 UTC 时间，MinValue 表示从未检查
+            public DateTime LastUpdateCheckUtc { get; set; } = DateTime.MinValue;
+            // 用户点「跳过此版本」记下的版本号，如 "1.2.3"，空串表示未跳过
+            public string SkippedUpdateVersion { get; set; } = "";
         }
 
         static string AppStateFilePath
@@ -131,6 +135,32 @@ namespace CommandLauncher
             _state.AnnotationStrokeColor = strokeColor;
             _state.AnnotationStrokeWidth = strokeWidth;
             _state.AnnotationTextFontSize = textFontSize;
+            SaveState();
+        }
+
+        /// <summary>上次检查更新的 UTC 时间（从未检查过为 DateTime.MinValue）。</summary>
+        public DateTime GetLastUpdateCheckUtc()
+        {
+            return _state.LastUpdateCheckUtc;
+        }
+
+        /// <summary>记录一次更新检查时间（应传 UTC now）。</summary>
+        public void SetLastUpdateCheckUtc(DateTime utc)
+        {
+            _state.LastUpdateCheckUtc = utc;
+            SaveState();
+        }
+
+        /// <summary>用户「跳过此版本」记下的版本号，空串表示未跳过。</summary>
+        public string GetSkippedUpdateVersion()
+        {
+            return _state.SkippedUpdateVersion;
+        }
+
+        /// <summary>记录用户跳过的版本号（如 "1.2.3"）。</summary>
+        public void SetSkippedUpdateVersion(string version)
+        {
+            _state.SkippedUpdateVersion = version;
             SaveState();
         }
 
