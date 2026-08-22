@@ -12,11 +12,35 @@ namespace CommandLauncher
     /// </summary>
     public static class StartupArgs
     {
+        /// <summary>开机自启相关的一次性维护动作（执行完即退出，不启动 UI）。</summary>
+        public enum AutoStartCommand
+        {
+            /// <summary>无（正常启动）。</summary>
+            None,
+
+            /// <summary><c>--install-autostart</c>：注册开机自启计划任务后退出。</summary>
+            Install,
+
+            /// <summary><c>--uninstall-autostart</c>：注销开机自启计划任务后退出。</summary>
+            Uninstall,
+        }
+
         /// <summary>
         /// <c>--wait-for-pid &lt;pid&gt;</c>：自动更新重启时由旧进程传入。
         /// 新进程必须先等该进程退出，再初始化窗口/热键/钩子/颜色矩阵，避免新旧实例抢占同一批全局资源。
         /// </summary>
         public static int? WaitForPid { get; private set; }
+
+        /// <summary>
+        /// <c>--install-autostart</c> / <c>--uninstall-autostart</c>：供安装脚本调用。
+        /// 这样计划任务的细节只有 <see cref="AutoStartManager"/> 一份实现，脚本不必重复拼 XML。
+        /// <para>
+        /// 注意 <c>--uninstall-autostart</c> 目前在仓库内没有调用方（<c>scripts/install.ps1</c> 只用 install，
+        /// 托盘菜单与 <c>autostart</c> 命令直连 <see cref="AutoStartManager"/>）。它是刻意保留的对称开关：
+        /// 卸载／清理脚本要注销计划任务时，除此之外没有别的入口。不是漏接线，勿删。
+        /// </para>
+        /// </summary>
+        public static AutoStartCommand AutoStart { get; private set; }
 
         /// <summary>首个位置参数：配置文件路径。未指定时为 null，由调用方取默认值。</summary>
         public static string? ConfigPath { get; private set; }
@@ -26,6 +50,7 @@ namespace CommandLauncher
         {
             WaitForPid = null;
             ConfigPath = null;
+            AutoStart = AutoStartCommand.None;
 
             if (args == null)
                 return;
@@ -47,6 +72,18 @@ namespace CommandLauncher
                         i++;
                     }
 
+                    continue;
+                }
+
+                if (string.Equals(arg, "--install-autostart", StringComparison.OrdinalIgnoreCase))
+                {
+                    AutoStart = AutoStartCommand.Install;
+                    continue;
+                }
+
+                if (string.Equals(arg, "--uninstall-autostart", StringComparison.OrdinalIgnoreCase))
+                {
+                    AutoStart = AutoStartCommand.Uninstall;
                     continue;
                 }
 

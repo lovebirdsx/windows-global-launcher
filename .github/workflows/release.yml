@@ -78,7 +78,7 @@ jobs:
         shell: pwsh
 
       # 5. 组装 staging 目录：只拷 exe（publish 目录里可能还有 .pdb，不打包），
-      #    加上 scripts/dist 下的兜底启动脚本与说明
+      #    加上 scripts/dist 下的兜底启动脚本与说明，以及安装脚本（Install.cmd / Install.ps1）
       - name: 组装 staging 目录
         shell: pwsh
         run: |
@@ -87,6 +87,8 @@ jobs:
           Copy-Item -Path 'scripts/dist/Start.cmd' -Destination 'staging/' -Force
           Copy-Item -Path 'scripts/dist/Start.ps1' -Destination 'staging/' -Force
           Copy-Item -Path 'scripts/dist/README-first.txt' -Destination 'staging/' -Force
+          Copy-Item -Path 'scripts/install.ps1' -Destination 'staging/Install.ps1' -Force
+          Copy-Item -Path 'scripts/dist/Install.cmd' -Destination 'staging/' -Force
 
       # 6. 打包 zip（命名契约：WindowsGlobalLauncher-v<ver>-win-x64.zip）
       - name: 打包

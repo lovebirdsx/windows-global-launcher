@@ -1,6 +1,6 @@
 # Windows Global Launcher
 
-常驻系统托盘的 Windows 桌面工具,包含六个相互独立的功能:命令启动器、Alt+Tab 窗口切换器、剪贴板历史、截图与贴图、护眼模式、自动更新。平时隐藏在后台,靠全局热键唤出。
+常驻系统托盘的 Windows 桌面工具,包含七个相互独立的功能:命令启动器、Alt+Tab 窗口切换器、剪贴板历史、截图与贴图、护眼模式、自动更新、开机自动启动。平时隐藏在后台,靠全局热键唤出。
 
 [![CI](https://github.com/lovebirdsx/windows-global-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/lovebirdsx/windows-global-launcher/actions/workflows/ci.yml)
 
@@ -70,6 +70,13 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 
 程序启动后自动在后台检查更新（每天最多一次），发现新版本时弹窗提示版本号与更新日志，可一键下载、替换并重启（详见下文「更新」章节）。
 
+### 开机自动启动
+
+可让程序在登录 Windows 后自动启动（经「任务计划程序」实现，登录后延迟 20 秒、以最高权限运行）：
+
+* 托盘菜单勾选「开机自动启动」，或在命令面板输入 `autostart` 切换（执行后会弹窗告知当前状态）
+* 重复启动不会出现第二个实例：开机自启已起一个、又手动双击时，会唤起已运行的命令面板
+
 ### 窗口动作热键
 
 全局生效的热键，在配置文件的 `WindowActions` 段自定义，修改配置后自动热更新。默认绑定：
@@ -89,7 +96,8 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 
 从 [GitHub Releases](https://github.com/lovebirdsx/windows-global-launcher/releases/latest) 下载 `WindowsGlobalLauncher-vX.Y.Z-win-x64.zip`，解压到任意目录。
 
-* **首次使用请双击 `Start.cmd`**：它会自动检测并静默安装 .NET 8 桌面运行时（未安装时约 55MB），然后启动程序。建议优先使用此方式。
+* **推荐双击 `Install.cmd` 安装到用户目录**：把程序装到 `%LOCALAPPDATA%\Programs\WindowsGlobalLauncher`（当前用户可写，自动更新可正常自替换），创建开始菜单快捷方式并配置开机自启。首次使用会自动检测并静默安装 .NET 8 桌面运行时（未安装时约 55MB）。
+* **仅想临时运行、不安装时双击 `Start.cmd`**：自动检测并静默安装 .NET 8 桌面运行时（未安装时约 55MB），然后直接启动当前目录下的程序。
 * 已安装 .NET 8 桌面运行时，可直接双击 `WindowsGlobalLauncher.exe` 启动。
 * 程序需要管理员权限（用于全局键盘钩子与窗口切换），启动时若弹出 UAC 提示请选择「是」。
 * 下载包可用同名 `.sha256` 文件校验完整性，在 PowerShell 中运行：
@@ -123,6 +131,7 @@ Get-FileHash WindowsGlobalLauncher-vX.Y.Z-win-x64.zip -Algorithm SHA256
 | `setconfig` | 选择 / 切换配置文件 |
 | `logs`      | 查看日志            |
 | `update`    | 检查更新            |
+| `autostart` | 切换开机自动启动    |
 | `exit`      | 退出程序            |
 
 ### 配置文件示例
@@ -167,11 +176,21 @@ dotnet test         # 运行单元测试
 .\scripts\publish.ps1   # 发布并启动(PowerShell)
 ```
 
-发布流程：更新 `src/WindowsGlobalLauncher/WindowsGlobalLauncher.csproj` 中的 `<Version>` → 提交 → 打 tag 并推送：
+发布可用一键脚本 `scripts/release.ps1`（改 csproj 版本号 → 跑单元测试 → commit → 打 tag → push 触发 CI，中途失败自动回滚本地改动）：
+
+```powershell
+.\scripts\release.ps1 -Bump patch          # 版本号按 patch 递增（默认）
+.\scripts\release.ps1 -Version 1.2.3       # 显式指定版本号
+.\scripts\release.ps1 -Bump minor -DryRun  # 只打印将执行的步骤，不做任何改动
+.\scripts\release.ps1 -Version 1.2.3 -SkipTests  # 跳过单元测试
+.\scripts\release.ps1 -AllowAnyBranch      # 允许在非 main 分支发版（默认仅 main）
+```
+
+脚本做的事等价于下面这套手工流程：更新 `src/WindowsGlobalLauncher/WindowsGlobalLauncher.csproj` 中的 `<Version>` → 提交 → 打 tag 并推送：
 
 ```bash
 git tag v1.2.3
 git push origin v1.2.3
 ```
 
-推送 tag 后 GitHub Actions（`.github/workflows/release.yml`）会自动构建、跑测试、打包并创建 Release（附 zip 与 sha256，release notes 自动生成）。
+无论脚本还是手工，最终都是推送 tag，GitHub Actions（`.github/workflows/release.yml`）会自动构建、跑测试、打包并创建 Release（附 zip 与 sha256，release notes 自动生成）。

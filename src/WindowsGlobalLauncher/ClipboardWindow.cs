@@ -30,18 +30,6 @@ namespace CommandLauncher
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
         [DllImport("user32.dll")]
-        private static extern bool SetForegroundWindow(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool BringWindowToTop(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
-
-        [DllImport("kernel32.dll")]
-        private static extern uint GetCurrentThreadId();
-
-        [DllImport("user32.dll")]
         private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO lpgui);
 
         [DllImport("user32.dll")]
@@ -49,13 +37,6 @@ namespace CommandLauncher
 
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam,
-            IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
-
-        [DllImport("user32.dll")]
-        private static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct POINT { public int X, Y; }
@@ -78,14 +59,8 @@ namespace CommandLauncher
         }
 
         private const byte VK_CONTROL = 0x11;
-        private const byte VK_MENU = 0x12;   // Alt
         private const byte VK_V = 0x56;
         private const uint KEYEVENTF_KEYUP = 0x0002;
-
-        private const uint WM_NULL = 0x0000;
-        private const int ERROR_TIMEOUT = 1460; // SendMessageTimeout 超时时的 GetLastError 值
-        private const uint SMTO_ABORTIFHUNG = 0x0002;
-        private const uint HungProbeTimeoutMs = 200;
 
         #endregion
 
@@ -355,60 +330,16 @@ namespace CommandLauncher
 
         // 热键经低级键盘钩子到达，输入并未真正进入本进程的消息队列，
         // 直接 Activate/SetForegroundWindow 会被前台锁定间歇性拒绝（表现为窗口弹出但无焦点）。
-        // 复用 WindowEnumerator.Activate 的 AttachThreadInput 技巧绕过前台锁定；失败时用 Alt 击发解锁并短间隔重试。
-        // 附加前先探测弹出前前台窗口线程是否挂起：若挂起，共享输入队列会把本线程一起拖死，此时跳过附加走兜底路径。
+        // 绕过前台锁定的 AttachThreadInput 技巧统一放在 ForegroundActivator（命令启动器窗口共用同一实现），
+        // 这里只保留与本窗口交互相关的策略：失败后短间隔重试、重试上限、焦点落到搜索框。
         private void TryActivateOnce()
         {
             if (!IsVisible)
                 return; // 已隐藏则不再激活
 
-            bool ok = false;
-            uint foreThread = 0;
-            try
-            {
-                var hwnd = new WindowInteropHelper(this).Handle;
-                uint thisThread = GetCurrentThreadId();
-                // 用弹出前记录的前台窗口取线程附加（而非 Show 之后的 GetForegroundWindow，避免被自身干扰导致附加错线程）
-                foreThread = _previousForeground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(_previousForeground, out _);
-
-                bool hung = IsWindowHung(_previousForeground);
-                bool attached = false;
-                try
-                {
-                    if (!hung && foreThread != 0 && foreThread != thisThread)
-                        attached = AttachThreadInput(thisThread, foreThread, true);
-
-                    if (hung)
-                        Logger.LogWarning($"跳过 AttachThreadInput：弹出前的前台窗口 {_previousForeground} 无响应，改用兜底激活路径");
-
-                    BringWindowToTop(hwnd);
-                    ok = SetForegroundWindow(hwnd);
-
-                    // 前台锁定仍拒绝时：模拟一次 Alt 击发解锁（经典 SetForegroundWindow 解锁手段），再重试一次
-                    if (!ok)
-                    {
-                        keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
-                        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                        ok = SetForegroundWindow(hwnd);
-                    }
-
-                    // 目标挂起时 SetForegroundWindow 可能仍被拒绝，改用不附加的兜底 API 切到前台
-                    if (hung && !ok)
-                    {
-                        SwitchToThisWindow(hwnd, true);
-                        ok = GetForegroundWindow() == hwnd;
-                    }
-                }
-                finally
-                {
-                    if (attached)
-                        AttachThreadInput(thisThread, foreThread, false);
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.LogWarning($"激活剪贴板窗口失败: {ex.Message}");
-            }
+            var hwnd = new WindowInteropHelper(this).Handle;
+            // 用弹出前记录的前台窗口取线程附加（而非 Show 之后的 GetForegroundWindow，避免被自身干扰导致附加错线程）
+            bool ok = ForegroundActivator.ForceForeground(hwnd, _previousForeground, "剪贴板窗口");
 
             try
             {
@@ -438,23 +369,6 @@ namespace CommandLauncher
                 _activationTimer.Stop();
                 Logger.LogWarning("剪贴板窗口多次激活失败，窗口可能未获得焦点");
             }
-        }
-
-        /// <summary>
-        /// 探测窗口是否无响应（挂起）。WM_NULL 的返回值恒为 0，无法用返回值区分成功与超时，
-        /// 故用 SetLastError + GetLastError == ERROR_TIMEOUT 判定超时；SMTO_ABORTIFHUNG 确保
-        /// 目标挂起时尽快返回，最坏情况只阻塞 HungProbeTimeoutMs 毫秒。
-        /// </summary>
-        private static bool IsWindowHung(IntPtr hwnd)
-        {
-            if (hwnd == IntPtr.Zero)
-                return false;
-
-            IntPtr result = SendMessageTimeout(hwnd, WM_NULL, IntPtr.Zero, IntPtr.Zero,
-                SMTO_ABORTIFHUNG, HungProbeTimeoutMs, out _);
-            if (result != IntPtr.Zero)
-                return false; // 消息被处理且返回非零 → 目标响应正常
-            return Marshal.GetLastWin32Error() == ERROR_TIMEOUT;
         }
 
         private void HideWindow()

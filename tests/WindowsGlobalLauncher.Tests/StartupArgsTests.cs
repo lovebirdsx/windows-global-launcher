@@ -17,6 +17,7 @@ namespace WindowsGlobalLauncher.Tests
 
             Assert.Null(StartupArgs.WaitForPid);
             Assert.Null(StartupArgs.ConfigPath);
+            Assert.Equal(StartupArgs.AutoStartCommand.None, StartupArgs.AutoStart);
         }
 
         [Fact]
@@ -96,6 +97,46 @@ namespace WindowsGlobalLauncher.Tests
 
             Assert.Null(StartupArgs.WaitForPid);
             Assert.Null(StartupArgs.ConfigPath);
+        }
+
+        [Theory]
+        [InlineData("--install-autostart")]
+        [InlineData("--INSTALL-AUTOSTART")]
+        public void Parse_InstallAutoStart_Recognized(string arg)
+        {
+            StartupArgs.Parse([arg]);
+
+            Assert.Equal(StartupArgs.AutoStartCommand.Install, StartupArgs.AutoStart);
+            Assert.Null(StartupArgs.ConfigPath); // 关键：开关不能掉进位置参数分支被当成配置文件路径
+        }
+
+        [Theory]
+        [InlineData("--uninstall-autostart")]
+        [InlineData("--Uninstall-AutoStart")]
+        public void Parse_UninstallAutoStart_Recognized(string arg)
+        {
+            StartupArgs.Parse([arg]);
+
+            Assert.Equal(StartupArgs.AutoStartCommand.Uninstall, StartupArgs.AutoStart);
+            Assert.Null(StartupArgs.ConfigPath);
+        }
+
+        [Fact]
+        public void Parse_AutoStartWithConfigPath_BothRead()
+        {
+            StartupArgs.Parse(["--install-autostart", @"C:\cfg.json"]);
+
+            Assert.Equal(StartupArgs.AutoStartCommand.Install, StartupArgs.AutoStart);
+            Assert.Equal(@"C:\cfg.json", StartupArgs.ConfigPath);
+        }
+
+        [Fact]
+        public void Parse_ResetsAutoStart()
+        {
+            StartupArgs.Parse(["--install-autostart"]);
+            StartupArgs.Parse([]);
+
+            Assert.Equal(StartupArgs.AutoStartCommand.None, StartupArgs.AutoStart);
         }
     }
 }

@@ -5,11 +5,14 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace CommandLauncher
 {
@@ -131,7 +134,7 @@ namespace CommandLauncher
     // 主窗口
     public class MainWindow : Window, IDisposable
     {
-        private static readonly string[] AppCommands = ["config", "setconfig", "logs", "update", "exit"];
+        private static readonly string[] AppCommands = ["config", "setconfig", "logs", "update", "autostart", "exit"];
 
         private readonly ObservableCollection<Command> _filteredCommands = [];
         private readonly HotKeyListener _hotKeyListener = new();
@@ -140,9 +143,35 @@ namespace CommandLauncher
         private int _selectedIndex = 0;
         private bool _disposed = false;
 
+        /// <summary>
+        /// 开机自启是否已开启的缓存值。
+        /// <see cref="AutoStartManager.IsEnabled"/> 要起一个 schtasks 子进程，
+        /// 而 <see cref="RefreshCommandList"/> 每敲一个字符就会跑一遍，绝不能在那里直接查询；
+        /// 因此只在启动、托盘菜单打开、切换开关这三个低频时机刷新。
+        /// </summary>
+        private bool _autoStartEnabled;
+
         private readonly TextBox _searchBox = CreateSearchBox();
         private readonly TextBlock _placeholder = CreatePlaceholder();
         private readonly ListBox _commandList = CreateCommandList();
+
+        #region 前台激活（与剪贴板历史窗口同一套策略，见 ForegroundActivator）
+
+        /// <summary>唤出前记录的前台窗口，用于 AttachThreadInput 绕过前台锁定（取线程做输入队列附加）。</summary>
+        private IntPtr _previousForeground;
+
+        /// <summary>显示后的激活宽限期：此间失焦视为激活抖动，重试激活而非隐藏窗口。</summary>
+        private const int ActivationGraceMs = 600;
+
+        /// <summary>激活重试上限与间隔（等待系统解除前台锁定）。</summary>
+        private const int MaxActivationRetries = 8;
+        private const int ActivationRetryIntervalMs = 60;
+
+        private readonly DispatcherTimer _activationTimer;
+        private long _graceUntil;
+        private int _activationRetries;
+
+        #endregion
 
         public MainWindow()
         {
@@ -150,12 +179,26 @@ namespace CommandLauncher
             _configPath = StartupArgs.ConfigPath ?? "config.json";
 
             Logger.LogInfo($"开始初始化主窗口，配置文件: {_configPath}");
+
+            // 激活重试定时器要在任何可能唤出窗口的东西（热键注册、托盘图标）之前就绪
+            _activationTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ActivationRetryIntervalMs) };
+            _activationTimer.Tick += (s, e) => TryActivateOnce();
+
             InitializeComponent();
             SetupNotifyIcon();
             SetupHotKeyListener();
             SetupUI();
 
-            WindowState = WindowState.Minimized;
+            // 开机自启状态放到后台查，不阻塞启动：AutoStartManager.IsEnabled 要起 schtasks 子进程并
+            // WaitForExit（常规 0.1~0.5s，冷启动更久），而它在启动阶段的唯一用途只是渲染 autostart
+            // 命令的「当前已开启/未开启」描述文本——远不值得让整个程序就绪时间为它等着。
+            // 面板要等用户按热键才会出现，届时早已回填；托盘菜单 Opening 时另有一次同步刷新兜底。
+            RefreshAutoStartStateAsync();
+
+            // 只 Hide 不 Minimize：窗口本来就没显示过，Hide 已足够让它不可见。
+            // 若初始状态设为 Minimized，首次唤出就得走「Show(最小化) → 还原」两段状态切换，
+            // 激活时序更脆弱；而且进程首次 ShowWindow 的 nCmdShow 会被 STARTUPINFO.wShowWindow 替换
+            // （见 WindowEnumerator.Activate 的同款注释），由计划任务/脚本拉起时首次还原可能直接落空。
             ShowInTaskbar = false;
             Hide();
             Logger.LogInfo("主窗口初始化完成");
@@ -181,6 +224,9 @@ namespace CommandLauncher
                     // 清理托管资源
                     try
                     {
+                        // 先停激活重试定时器：否则退出流程中它还可能触发一次 TryActivateOnce
+                        _activationTimer?.Stop();
+
                         if (_notifyIcon != null)
                         {
                             _notifyIcon.Visible = false;
@@ -251,6 +297,10 @@ namespace CommandLauncher
             AllowsTransparency = true;
             Background = new SolidColorBrush(Color.FromArgb(240, 30, 30, 30));
             Topmost = true;
+            // 不靠 Show 抢焦点：热键路径上的输入没有进入本进程消息队列，Show 自带的激活会被前台锁定
+            // 间歇性拒绝，产生「短暂激活又立刻失活」的抖动，进而被 OnDeactivated 当成失焦直接隐藏
+            // （表现就是按了热键什么都没有）。激活统一交给 TryActivateOnce。
+            ShowActivated = false;
 
             // 主容器
             var mainGrid = new Grid
@@ -426,6 +476,9 @@ namespace CommandLauncher
                 togglePinsItem.Click += (s, e) => PinWindow.ToggleAllVisibility();
                 contextMenu.Items.Add(togglePinsItem);
                 contextMenu.Items.Add(BuildEyeCareMenu());
+                var autoStartItem = new System.Windows.Forms.ToolStripMenuItem("开机自动启动") { CheckOnClick = false };
+                autoStartItem.Click += (s, e) => ToggleAutoStart();
+                contextMenu.Items.Add(autoStartItem);
                 contextMenu.Items.Add("设定配置文件", null, (s, e) => AppConfig.SetConfigFile());
                 contextMenu.Items.Add("打开配置文件", null, (s, e) => AppConfig.OpenConfigFile());
                 contextMenu.Items.Add("打开日志文件", null, (s, e) => Logger.OpenLogFile());
@@ -438,6 +491,10 @@ namespace CommandLauncher
                 {
                     togglePinsItem.Text = PinWindow.IsAllHidden ? "显示所有贴图" : "隐藏所有贴图";
                     togglePinsItem.Enabled = PinWindow.OpenCount > 0;
+
+                    // 计划任务可能被用户在「任务计划程序」里改掉，每次打开菜单实查一次（低频，可接受）
+                    _autoStartEnabled = AutoStartManager.IsEnabled();
+                    autoStartItem.Checked = _autoStartEnabled;
                 };
 
                 _notifyIcon.DoubleClick += (s, e) => ShowWindow();
@@ -505,12 +562,7 @@ namespace CommandLauncher
 
         private void SetupHotKeyListener()
         {
-            // 使用配置文件中的热键
-            if (!_hotKeyListener.RegisterHotKey(AppConfig.Instance.Config.HotKey))
-            {
-                Logger.LogWarning($"注册热键失败: {AppConfig.Instance.Config.HotKey}，使用默认热键 {AppConfig.DefaultHotKey}");
-                _hotKeyListener.RegisterHotKey(AppConfig.DefaultHotKey);
-            }
+            RegisterLauncherHotKey(isReload: false);
 
             // 配置更新时——一定要切回到 UI 线程
             AppConfig.Instance.ConfigUpdated += () =>
@@ -518,34 +570,136 @@ namespace CommandLauncher
                 Application.Current.Dispatcher.Invoke(() =>
                 {
                     _hotKeyListener.UnregisterHotKey();
-
-                    var newHotKey = AppConfig.Instance.Config.HotKey;
-                    if (!_hotKeyListener.RegisterHotKey(newHotKey))
-                    {
-                        Logger.LogWarning($"重新注册热键失败: {newHotKey}, 使用默认热键 {AppConfig.DefaultHotKey}");
-                        _hotKeyListener.RegisterHotKey(AppConfig.DefaultHotKey);
-                    }
+                    RegisterLauncherHotKey(isReload: true);
                 });
             };
 
             _hotKeyListener.HotKeyPressed += ShowWindow;
         }
 
-
-        private void ShowWindow()
+        /// <summary>
+        /// 注册命令面板的全局热键，失败时退回默认热键。
+        /// <para>
+        /// 两个都失败时必须让用户看得见：热键是本程序唯一的入口，
+        /// 只写日志的话用户只会觉得「程序坏了」，而真实原因通常是热键被别的程序抢先注册了。
+        /// </para>
+        /// </summary>
+        private void RegisterLauncherHotKey(bool isReload)
         {
+            string prefix = isReload ? "重新注册热键失败" : "注册热键失败";
+            var hotKey = AppConfig.Instance.Config.HotKey;
+
+            if (_hotKeyListener.RegisterHotKey(hotKey))
+                return;
+
+            // 配置里就是默认热键时不必再试一遍同样的组合
+            bool sameAsDefault = string.Equals(hotKey, AppConfig.DefaultHotKey, StringComparison.OrdinalIgnoreCase);
+            if (!sameAsDefault)
+            {
+                Logger.LogWarning($"{prefix}: {hotKey}，改用默认热键 {AppConfig.DefaultHotKey}");
+                if (_hotKeyListener.RegisterHotKey(AppConfig.DefaultHotKey))
+                {
+                    ShowHotKeyBalloon($"热键 {hotKey} 注册失败（可能已被其它程序占用），已改用 {AppConfig.DefaultHotKey}。");
+                    return;
+                }
+            }
+
+            Logger.LogError($"{prefix}: {hotKey}，默认热键 {AppConfig.DefaultHotKey} 同样注册失败，命令面板将只能从托盘唤出",
+                new InvalidOperationException("RegisterHotKey 失败"));
+            ShowHotKeyBalloon($"热键 {hotKey} 注册失败，可能已被其它程序占用。\n请改用托盘图标唤出，或在配置文件中换一个热键。");
+        }
+
+        /// <summary>托盘气泡提示（失败静默：提示不出来也不能影响程序运行）。</summary>
+        private void ShowHotKeyBalloon(string message)
+        {
+            try
+            {
+                _notifyIcon.ShowBalloonTip(8000, "Command Launcher", message, System.Windows.Forms.ToolTipIcon.Warning);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"显示托盘气泡提示失败: {ex.Message}");
+            }
+        }
+
+
+        /// <summary>
+        /// 唤出命令面板：全局热键、托盘「显示」、托盘双击、以及第二个实例的唤起请求都走这里。
+        /// 已经在前台时再按一次热键即收起（切换式）；已显示但没拿到焦点时不收起，而是继续抢焦点。
+        /// </summary>
+        public void ShowWindow()
+        {
+            if (IsVisible && IsActive)
+            {
+                HideWindow();
+                return;
+            }
+
+            // 必须在 Show 之前记录：Show 之后前台就是我们自己了。
+            // 已经可见（激活失败重来）时保留原值，否则会把自己记成「弹出前的前台窗口」。
+            if (!IsVisible)
+                _previousForeground = ForegroundActivator.GetForeground();
+
             CenterWindowOnCurrentScreen();
-            Show();
+            Show(); // ShowActivated=false，只显示不激活
             WindowState = WindowState.Normal;
 
-            Activate();
+            _graceUntil = Environment.TickCount64 + ActivationGraceMs;
+            _activationRetries = 0;
 
-            _searchBox.Focus();
-            _searchBox.SelectAll();
             _placeholder.Visibility = string.IsNullOrEmpty(_searchBox.Text) ? Visibility.Visible : Visibility.Hidden;
 
             RefreshCommandList(_searchBox.Text);
             ScrollCommandListToTop();
+
+            // 唤出是低频操作，这条 INFO 是排查「按了热键没反应」的关键线索：
+            // 日志里没有它 = WM_HOTKEY 根本没到；有它但用户没看到窗口 = 位置或激活的问题。
+            Logger.LogInfo($"命令面板唤出：位置 ({Left:F0},{Top:F0}) 尺寸 {Width:F0}x{Height:F0}，弹出前前台窗口 0x{_previousForeground.ToInt64():X}");
+
+            TryActivateOnce();
+        }
+
+        /// <summary>
+        /// 抢一次前台焦点。失败时按 <see cref="ActivationRetryIntervalMs"/> 短间隔重试，
+        /// 直到成功或用尽 <see cref="MaxActivationRetries"/> 次（等待系统解除前台锁定）。
+        /// </summary>
+        private void TryActivateOnce()
+        {
+            if (!IsVisible)
+                return; // 已隐藏则不再激活
+
+            var hwnd = new WindowInteropHelper(this).Handle;
+            bool ok = ForegroundActivator.ForceForeground(hwnd, _previousForeground, "命令启动器");
+
+            try
+            {
+                Activate(); // WPF 层同步激活态
+                Keyboard.Focus(_searchBox);
+                _searchBox.SelectAll();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"命令启动器激活后续处理失败: {ex.Message}");
+            }
+
+            _activationRetries++;
+            if (ok)
+            {
+                _activationTimer.Stop(); // 激活成功即停止重试，避免定时器持续触发
+            }
+            else if (_activationRetries < MaxActivationRetries)
+            {
+                if (_activationRetries == 1)
+                    Logger.LogWarning("命令启动器首次激活失败，开始短间隔重试");
+
+                _activationTimer.Stop();
+                _activationTimer.Start();
+            }
+            else
+            {
+                _activationTimer.Stop();
+                Logger.LogWarning("命令启动器多次激活失败，窗口可能未获得焦点");
+            }
         }
 
         private void CenterWindowOnCurrentScreen()
@@ -629,6 +783,15 @@ namespace CommandLauncher
                 Shell = "update",
                 LastExecuted = AppState.Instance.GetCommandLastExecutedTime("update"),
                 ExecuteCount = AppState.Instance.GetCommandExecuteCount("update")
+            });
+
+            commands.Add(new Command
+            {
+                Name = "autostart",
+                Description = "开机自动启动：切换开/关（当前" + (_autoStartEnabled ? "已开启" : "未开启") + "）",
+                Shell = "autostart",
+                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("autostart"),
+                ExecuteCount = AppState.Instance.GetCommandExecuteCount("autostart")
             });
 
             commands.Add(new Command
@@ -831,6 +994,10 @@ namespace CommandLauncher
                     // 手动检查更新是网络操作，fire-and-forget；结果由 UpdateCoordinator 自行弹窗反馈
                     _ = UpdateCoordinator.RunManualCheckAsync();
                 }
+                else if (selectedCommand.Name == "autostart")
+                {
+                    ToggleAutoStart();
+                }
                 else if (selectedCommand.Name == "exit")
                 {
                     ExitApplication();
@@ -839,6 +1006,46 @@ namespace CommandLauncher
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// 切换开机自动启动（命令面板的 autostart 命令与托盘菜单共用）。
+        /// 结果一律弹窗告知：这是个「设置类」操作，静默成功/失败都会让用户不确定到底生效没有。
+        /// </summary>
+        private void ToggleAutoStart()
+        {
+            bool enabled = AutoStartManager.IsEnabled();
+            bool ok = enabled ? AutoStartManager.Disable(out string error) : AutoStartManager.Enable(out error);
+
+            _autoStartEnabled = AutoStartManager.IsEnabled();
+
+            if (ok)
+            {
+                MessageBox.Show(
+                    _autoStartEnabled
+                        ? "已开启开机自动启动。\n下次登录 Windows 时会自动启动本程序。"
+                        : "已关闭开机自动启动。",
+                    "开机自动启动", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                MessageBox.Show($"设置开机自动启动失败：\n{error}", "开机自动启动",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        /// <summary>
+        /// 后台刷新 <see cref="_autoStartEnabled"/> 缓存，回填时切回 UI 线程。
+        /// 只在启动时调用一次；托盘菜单 Opening 与 <see cref="ToggleAutoStart"/> 那两处是低频且需要即时准确的
+        /// 时机，仍走同步查询。查询失败不弹窗——它只影响一句描述文本，<see cref="AutoStartManager"/> 内部已记日志。
+        /// </summary>
+        private void RefreshAutoStartStateAsync()
+        {
+            Task.Run(() =>
+            {
+                bool enabled = AutoStartManager.IsEnabled();
+                Dispatcher.BeginInvoke(new Action(() => _autoStartEnabled = enabled));
+            });
         }
 
         private void ExecuteCommandImpl(Command selectedCommand)
@@ -997,6 +1204,7 @@ namespace CommandLauncher
 
         private void HideWindow()
         {
+            _activationTimer.Stop();
             Hide();
             _searchBox.Clear();
             _placeholder.Visibility = Visibility.Visible;
@@ -1031,9 +1239,22 @@ namespace CommandLauncher
             base.OnClosed(e);
         }
 
+        // 失焦即隐藏。但显示后的宽限期内失焦多半是激活序列的瞬时抖动
+        // （前台被原窗口短暂夺回），此时应重试激活而不是隐藏，否则热键唤出会「一闪即隐」，
+        // 用户看到的现象就是「按了 Ctrl+Shift+I 完全没反应」。
         protected override void OnDeactivated(EventArgs e)
         {
             base.OnDeactivated(e);
+
+            if (!IsVisible)
+                return;
+
+            if (Environment.TickCount64 < _graceUntil)
+            {
+                TryActivateOnce();
+                return;
+            }
+
             HideWindow();
         }
     }

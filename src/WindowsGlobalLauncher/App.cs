@@ -41,6 +41,10 @@ namespace CommandLauncher
             var mainWindow = new MainWindow();
             MainWindow = mainWindow;
 
+            // 用户重复启动（开机自启已起一个、又手动双击）时，第二个实例会广播唤起请求后退出，
+            // 这里让已在运行的实例把命令面板弹出来，行为上等同于「双击就能用」。
+            SingleInstance.StartListening(mainWindow.ShowWindow);
+
             Logger.LogInfo("正在创建 Alt+Tab 窗口切换器");
             _switcherWindow = new SwitcherWindow();
 

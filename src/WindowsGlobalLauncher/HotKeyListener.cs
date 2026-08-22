@@ -101,6 +101,10 @@ namespace CommandLauncher
 
             if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == HOTKEY_ID)
             {
+                // 唤出是低频操作，这条日志是排查「按了热键没反应」的分水岭：
+                // 有它说明热键已被系统投递到本进程，问题出在窗口显示/激活；
+                // 没有它说明按键根本没到（热键被别的程序抢注、或被更前面的低级钩子吞掉）。
+                Logger.LogInfo("收到全局热键消息 WM_HOTKEY");
                 HotKeyPressed?.Invoke();
             }
         }

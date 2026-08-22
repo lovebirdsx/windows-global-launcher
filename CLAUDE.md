@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含六个相互独立的功能：
+Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含七个相互独立的功能：
 
 1. **命令启动器**（`MainWindow`）：全局热键（默认 `Ctrl+Shift+I`）弹出的搜索式命令面板，从 JSON 配置读取命令并通过 `Process.Start` 执行。
 2. **Alt+Tab 窗口切换器**（`SwitcherWindow`）：接管系统 Alt+Tab，竖向列出当前窗口（图标 + 标题）供切换。
@@ -14,8 +14,9 @@ Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时�
 4. **截图与贴图**（`ScreenshotManager` + `ScreenshotOverlayWindow` + `PinWindow`）：Snipaste 式区域截图（默认 `F4`，框选/窗口吸附/标注/取色，确认后复制到剪贴板或 OCR 识别选区文字）与屏幕贴图（默认 `F7`，剪贴板图片钉为图片贴图，无图片有文字时钉为便签式文字贴图）；`Shift+F7` 整体隐藏/显示所有贴图（新钉贴图自动退出整体隐藏状态）。
 5. **护眼模式**（`EyeCareManager`）：内置「正常」「办公」两种色温/亮度模式，经命令启动器（搜「护眼」）或托盘菜单选择，通过 Magnification 全屏颜色矩阵生效。
 6. **自动更新**（`UpdateChecker` + `UpdateInstaller` + `UpdateCoordinator` + `UpdateWindow`）：启动后延迟后台检查 GitHub Release（每天最多一次），发现新版本弹窗提示，一键下载校验、自替换 exe 并重启。
+7. **开机自启与安装**（`AutoStartManager` + `SingleInstance` + `scripts/install.ps1`）：登录后经计划任务（非注册表 Run 键）自动启动；单实例互斥 + 广播唤起，重复启动时唤醒已运行实例而非起第二个；安装脚本装到 `%LOCALAPPDATA%\Programs`。
 
-前三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出；截图/贴图为静态类无常驻窗口，由 `WindowActions` 热键或托盘菜单按需触发；护眼模式无独立窗口，启动时恢复上次选择；自动更新在 `App.OnStartup` 末尾 fire-and-forget 后台检查，仅发现新版本时弹提示窗（`UpdateWindow`），无常驻窗口。
+前三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出；截图/贴图为静态类无常驻窗口，由 `WindowActions` 热键或托盘菜单按需触发；护眼模式无独立窗口，启动时恢复上次选择；自动更新在 `App.OnStartup` 末尾 fire-and-forget 后台检查，仅发现新版本时弹提示窗（`UpdateWindow`），无常驻窗口。单实例互斥与开机自启同样无常驻窗口：前者是 `Program.Main` 里的命名 Mutex + 隐藏消息窗口（拿不到互斥量的第二个实例广播唤起后即退出），后者是登录触发的计划任务，运行期不产生任何窗口。
 
 ## 常用命令
 
@@ -28,6 +29,10 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 发布与本地运行用 PowerShell 脚本（`scripts/publish.ps1`）：会先 `Stop-Process` 掉正在运行的实例，`dotnet publish` 出单文件 exe（`-r win-x64 --self-contained false`，依赖已装 .NET 8 运行时）到 `dist/`，再启动它。
 
 正式发版走 CI：推送 `v1.2.3` 形式的 tag 即触发 `.github/workflows/release.yml` 自动跑单元测试、发布单文件 exe（用 `-p:Version=<tag 去 v 前缀>` 覆盖版本号）并创建 GitHub Release（附 zip 与 sha256，release notes 自动生成）；`scripts/publish.ps1` 仅用于本地开发运行。
+
+一键发版用 `scripts/release.ps1`：自动改 csproj 的 `<Version>` → 跑单元测试 → commit → 打 tag → push 触发 CI（与上面手打 tag 等效，最终都是 push tag 触发 release.yml；中途失败自动回滚本地改动，已 push 的 commit/tag 不回滚）。参数：`-Version 1.2.3` 显式指定或 `-Bump patch|minor|major` 自动递增（默认 `patch`）、`-DryRun` 只打印不执行、`-SkipTests` 跳过测试、`-AllowAnyBranch` 放行非 main 分支发版（默认仅 main）。版本号严格三段校验与 `CompareVersion` 口径一致。
+
+安装用 `scripts/install.ps1`：装到 `%LOCALAPPDATA%\Programs\WindowsGlobalLauncher`（检测/静默安装 .NET 8 桌面运行时 → 停旧实例 → 复制 exe → 建开始菜单快捷方式 → 经 `--install-autostart` 配置开机自启 → 启动）。参数：`-NoAutoStart`（跳过开机自启）、`-DesktopShortcut`（额外建桌面快捷方式）、`-NoLaunch`（装完不启动）、`-Source`/`-Dest`（自定义源/目标目录）。分发包里的 `Install.cmd` 即 `powershell -ExecutionPolicy Bypass -File Install.ps1` 的封装。
 
 **运行需要管理员权限**：`app.manifest` 声明 `requireAdministrator`（见下文「键盘钩子与权限」），因此直接 `dotnet run` 会触发 UAC。
 
@@ -45,7 +50,7 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 
 **`AppConfig.SaveConfig` 是手写 JSON 字符串**（为了带注释），不是 `JsonSerializer` 输出。修改 `Config`/`ConfigCommand` 结构时必须同步更新这段手写拼接逻辑，否则保存的文件会与模型不一致。
 
-**内置命令**：`config` / `setconfig` / `logs` / `exit` 与护眼模式命令（`护眼：xxx`，来自 `EyeCareManager.Modes`）在 `MainWindow.RefreshCommandList` 中动态注入命令列表，由 `ExecuteAppCommand` 特殊处理，而非走 `Process.Start`。
+**内置命令**：`config` / `setconfig` / `logs` / `update` / `autostart` / `exit` 与护眼模式命令（`护眼：xxx`，来自 `EyeCareManager.Modes`）在 `MainWindow.RefreshCommandList` 中动态注入命令列表，由 `ExecuteAppCommand` 特殊处理，而非走 `Process.Start`。其中 `autostart` 切换开机自启（调 `ToggleAutoStart`，与托盘菜单「开机自动启动」共用）。
 
 **子进程降权（普通用户权限启动）**：见 `MediumIntegrityProcess.cs`。launcher 自身以管理员运行，直接 `Process.Start` 出的子进程会继承管理员令牌。`MainWindow.ExecuteCommandImpl` 默认借用桌面 Shell（explorer.exe）令牌、通过 `MediumIntegrityProcess.Start`（`GetShellWindow` → 复制令牌 → `CreateProcessWithTokenW`）以中等完整性级别启动命令，等同用户桌面双击。`ConfigCommand`/`Command` 的 `RunAsAdmin` 字段（默认 `false`）控制：为 `true` 时走原 `Process.Start` 路径保留管理员权限。降权失败时抛异常 → 上层 `catch` 弹窗报错且不启动（不回退到管理员）。降权路径等价于 `UseShellExecute=false` 的直接 `CreateProcess`，不支持 URL/文档关联启动，也不做 stderr 重定向/退出码监听。新增/修改 `RunAsAdmin` 字段时记得同步 `AppConfig.SaveConfig` 的手写 JSON 拼接（布尔值要输出小写 `true`/`false`）。
 
@@ -53,6 +58,8 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - 命令启动器用 `HotKeyListener`（`user32.dll` 的 `RegisterHotKey` + 隐藏消息窗口接收 `WM_HOTKEY`）。注意系统占用的组合键（如 `Alt+Tab`）无法用 `RegisterHotKey` 注册。
 - 切换器用 `KeyboardHook`（`WH_KEYBOARD_LL` 低级键盘钩子），才能拦截并「吞掉」(`return (IntPtr)1`) 系统原生 Alt+Tab。
 - 热键字符串解析统一在 `HotKeyParser.TryParse`（纯静态函数，配套单测），`HotKeyListener` 与 `KeyboardHook` 的动作绑定都经由它解析，修改语法只需改这一处。
+- **命令启动器热键唤出的激活加固**（`ForegroundActivator.cs`）：`RegisterHotKey` 注册成功、`WM_HOTKEY` 也到达，但 `Show()` 自带的激活会被前台锁定间歇性拒绝，产生「短暂激活→立刻失活」抖动，`OnDeactivated` 无条件 `HideWindow()` 又把刚显示的窗口隐藏，用户看到「按热键完全没反应」。解法：`ShowActivated=false` 不靠 Show 抢焦点，激活统一走 `ForegroundActivator.ForceForeground`（AttachThreadInput 绕前台锁定，附加前先 `IsWindowHung` 探测），失败按 60ms 间隔重试至多 8 次；显示后 600ms 宽限期内失焦视为抖动、重试激活而非隐藏。与剪贴板历史窗口同一套策略，公共逻辑（AttachThreadInput + Alt 解锁重试 + 挂起探测 + `SwitchToThisWindow` 兜底）抽到 `ForegroundActivator`、两个窗口共用，宽限期/重试次数这类交互策略各窗口自留。另去掉了构造函数里的 `WindowState.Minimized` 初始态（只 Hide 即可）：否则首次唤出要走「Show(最小化)→还原」两段状态切换，且进程首次 `ShowWindow` 的 nCmdShow 会被 STARTUPINFO 的 `wShowWindow` 替换（同 `WindowEnumerator.Activate` 的既有坑）。
+- **热键注册失败会弹托盘气泡提示**：此前只写日志、用户完全看不到，而热键是本程序唯一入口。`RegisterLauncherHotKey` 里配置热键失败先退回默认热键并气泡告知，两者都失败则气泡提示改用托盘图标唤出或换绑。
 
 **可配置窗口动作热键（如 Alt+Q 关闭前台窗口）**：表驱动结构，涉及 `HotKeyParser.cs`、`KeyboardHook.cs`（`HotKeyActionBinding` + `SetActionBindings`）、`WindowActions.cs`、`SwitcherWindow.cs`。
 - 配置文件 `WindowActions` 段（`ConfigWindowAction`：动作名 + 热键字符串 + Enabled）定义绑定；`WindowActions.All` 字典是动作名 → 实现的唯一注册点，**新增动作 = 字典加条目 + 配置文件加一行**。
@@ -71,7 +78,7 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - **持久化**：仿 `AppState` 单例模式，元数据写 `clipboard-history.json`（ UnsafeRelaxedJsonEscaping 保留中文），图片按条目 Id 存 `clipboard-images\{Id}.png`；上限 100 条（`MaxEntries`），淘汰/删除条目时连同 PNG 清理。加载时丢弃图片文件已丢失的条目。
 - **唤出与粘贴**：`ShowHistory` 在 `Show()` 前先 `GetForegroundWindow` 记下目标窗口；回车后先 `SetToClipboard` 写回内容，再 `WindowEnumerator.Activate` 恢复前台，延迟 120ms 后 `keybd_event` 模拟 Ctrl+V。
 - **弹出位置**：三级回退——`GetGUIThreadInfo` 取前台线程插入符矩形 + `ClientToScreen` 换算；VS Code 等 Electron/Chromium 应用光标自绘取不到，改用 UI Automation（`AutomationElement.FocusedElement` → `TextPattern` 选区的 `GetBoundingRectangles`）；再失败回退「鼠标所在屏幕居中」（同 `MainWindow.CenterWindowOnCurrentScreen`），并钳制在屏幕工作区内。UIA 是跨进程 COM 调用、无超时，目标应用（VS Code 等 Electron）卡顿时会长时间阻塞 UI 线程，故 `TryGetCaretViaUIA` 改为 `Task.Run` 后台执行 + `Wait(300ms)`（常量 `UiaTimeoutMs`）短超时，超时/失败静默回退居中定位并记 WARN；只把 `Point?` 纯数据传回 UI 线程，`AutomationElement` 等 COM 对象留在后台线程。
-- **前台激活**：热键经低级钩子到达（输入未真正进入本进程队列，且经 `Dispatcher.BeginInvoke` 异步执行），直接 `Activate`/`SetForegroundWindow` 会被前台锁定间歇性拒绝（非文本输入框时 `PositionWindow` 的 UI Automation 首次调用很慢、进一步拖到锁定武装之后），导致第一次唤出一闪即隐。因此窗口改为 `ShowActivated=false` 不抢焦点，激活统一走 `TryActivateOnce`：用弹出前记录的 `_previousForeground` 取线程 `AttachThreadInput` 附加（同 `WindowEnumerator.Activate` 技巧）→ `BringWindowToTop` → `SetForegroundWindow`，失败时模拟一次 Alt 击发解锁再重试，仍未果则经 `DispatcherTimer` 短间隔重试（上限 `MaxActivationRetries`）。附加前同样先 `IsWindowHung` 探测弹出前前台窗口线程是否挂起，挂起则跳过 attach、改走 `SwitchToThisWindow` 兜底（避免共享输入队列把 UI 线程一起拖死，见切换器小节）；attach/detach 严格 `try/finally` 配对，异常路径也保证解除附加。失焦即隐藏（同 `MainWindow`），但显示后有 `ActivationGraceMs` 宽限期，此间失焦视为激活抖动、重试激活而非隐藏。
+- **前台激活**：热键经低级钩子到达（输入未真正进入本进程队列，且经 `Dispatcher.BeginInvoke` 异步执行），直接 `Activate`/`SetForegroundWindow` 会被前台锁定间歇性拒绝（非文本输入框时 `PositionWindow` 的 UI Automation 首次调用很慢、进一步拖到锁定武装之后），导致第一次唤出一闪即隐。因此窗口改为 `ShowActivated=false` 不抢焦点，激活统一走 `TryActivateOnce` → `ForegroundActivator.ForceForeground`（与命令启动器共用同一实现）：用弹出前记录的 `_previousForeground` 取线程 `AttachThreadInput` 附加（同 `WindowEnumerator.Activate` 技巧）→ `BringWindowToTop` → `SetForegroundWindow`，失败时模拟一次 Alt 击发解锁再重试，仍未果则由调用方经 `DispatcherTimer` 短间隔重试（上限 `MaxActivationRetries`）。附加前同样先 `ForegroundActivator.IsWindowHung` 探测弹出前前台窗口线程是否挂起，挂起则跳过 attach、改走 `SwitchToThisWindow` 兜底（避免共享输入队列把 UI 线程一起拖死，见切换器小节）；attach/detach 严格 `try/finally` 配对，异常路径也保证解除附加。失焦即隐藏（同 `MainWindow`），但显示后有 `ActivationGraceMs` 宽限期，此间失焦视为激活抖动、重试激活而非隐藏。
 - **交互**：与命令启动器一致（↑↓/Ctrl+P/Ctrl+N 移动、回车执行、Esc 取消），另支持 Delete 删除选中条目；再按一次热键关闭（切换式）。键盘处理在搜索框 `PreviewKeyDown`，不依赖全局钩子。
 - **条目预览**：选中条目时弹出独立预览窗（`_previewWindow`，`ShowActivated=false` 不抢焦点），位于主窗口右侧、放不下翻左侧，钳制在屏幕工作区内（定位统一走 `PlacePreview`）。图片条目尽量按原始像素显示，超过上限（720×560 与工作区 50%/60% 取较小）则等比缩小，预览图经 `ClipboardHistoryManager.LoadFullImage` 加载并缓存在条目上（`ClipboardEntry.PreviewImage`）。`ShowImagePreview` 先按预览上限（含 DPI 换算）算出 `maxPixelWidth` 传给 `LoadFullImage`，`LoadBitmap` 仅在原图更宽时才设 `DecodePixelWidth`（只降不升），避免接近 5MB 上限的大图在 UI 线程全量解码造成长阻塞；`ClipboardEntry.PreviewImageDecodedWidth`（`JsonIgnore`）记录实际解码宽度，复用缓存要求缓存宽度 ≥ 当前需求、否则按更大宽度重解码。`SetToClipboard`（全尺寸）与列表缩略图（52px）语义不变；文本条目单行预览放不下（`Preview.Length > TextPreviewThreshold`）时显示折行完整文本（超长截断至 `TextPreviewMaxChars`，滚轮可滚动，滚动条刻意隐藏——点击会激活预览窗导致主窗口失焦关闭）。注意 `RefreshList` 在 `Show()` 之前触发 `SelectionChanged` 时窗口尚不可见，`ShowHistory` 末尾需补调一次 `UpdatePreview()`。
 - **列表滚动条**：刻意不显示——垂直 `Hidden`（保留滚动，键盘导航 `ScrollIntoView` 与滚轮仍可用），水平 `Disabled`（内容约束在列表宽度内，超长文本走省略号截断）。
@@ -133,12 +140,31 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - **校验值拿不到就拒绝安装，不降级**：优先用 GitHub 资产的 `digest` 字段（`sha256:<hex>`，取冒号后小写 hex；只接受 64 位小写 hex，格式异常返回空串让调用方走下一档而非拿坏值比对导致更新永远失败）——它来自 `api.github.com` 直连响应，是整条链路里唯一未经镜像中转的可信锚点；取不到才下载同名 `.sha256` 资产（sha256sum 风格取第一个空白分隔字段，同样直连优先，取自镜像时记 WARN 说明信任降级）。**两者都拿不到时拒绝自动安装并引导手动下载**，刻意不降级为仅体积校验：更新包要拿管理员权限直接替换自身可执行文件，做一个体积相同的替换品毫无难度，仅体积校验等同于没有校验；而 release.yml 保证每个 zip 都带 `.sha256`、GitHub 也会自动生成 digest，两者同时缺失只可能是异常情况。
 - **下载中退出程序的协作**：`UpdateWindow.OnClosing` 在下载态 `e.Cancel = true`（拦「用户误关窗口」），但同一条路径也会把 `Application.Shutdown()` 挡下来。而 `MainWindow.ExitApplication` 是**先 `Dispose`（移除托盘图标、注销热键与钩子）再 `Shutdown`**，Shutdown 一旦被取消，程序就停在「没有托盘图标、没有热键、也退不掉」的半死状态。故 `ExitApplication` 里：`UpdateInstaller.IsBusy` 时先弹确认框，用户坚持退出则调 `UpdateWindow.PrepareForApplicationShutdown()` 放行拦截。**给窗口加「拒绝关闭」逻辑时都要想一遍应用级退出这条路径。**
 - **zip 用内置 `System.IO.Compression.ZipFile`**：SharpCompress 只为 7z（OCR 引擎包）引入，更新包是 zip，勿混用。
-- **不引入单实例 Mutex**：`--wait-for-pid` 已覆盖更新场景的新旧并存问题；「用户重复双击起两个实例」是独立的既有问题，不在此功能范围。
+- **单实例机制已引入**（见「单实例、开机自启与安装实现要点」）：`--wait-for-pid` 只负责更新场景的新旧进程并存（新进程等旧进程退出），「用户重复双击起两个实例」改由 `SingleInstance` 命名 Mutex + 广播唤起处理，不再是不在此功能范围的既有问题。
 - **AppState 加字段**：`AppState` 走 `JsonSerializer`（内部 `State` 类），加字段只改 `State` 类 + getter/setter 即可，**区别于 `AppConfig.SaveConfig` 那套手写 JSON 拼接**（那里加字段必须同步改拼接代码）。本功能新增 `LastUpdateCheckUtc`/`SkippedUpdateVersion` 两字段。注意 `AppState` 以整文件覆写方式持久化、本身不做并发保护，故**更新检查在后台线程拿到结果后要经 `UpdateCoordinator.MarkCheckedOnUiThread` 切回 UI 线程再写**，避免与 UI 线程的其它 `SaveState` 撞车。
 - **内置命令 `update`**：与 `config`/`logs` 同机制，四处——`AppCommands` 数组、`RefreshCommandList` 注入命令项、`ExecuteAppCommand` 分支（`_ = UpdateCoordinator.RunManualCheckAsync()`，网络操作 fire-and-forget），另加托盘菜单「检查更新」一处。新增内置命令照此四处改。
 - **release.yml 的两条硬约束**：① tag 名与手动输入是外部可控字符串，**必须经 `env:` 传进 pwsh 脚本**，不能用 `'${{ ... }}'` 直接插值——插值发生在脚本执行之前，带引号或换行的 tag 名会闭合字符串并执行任意 PowerShell；② 版本号正则严格三段 `^\d+\.\d+\.\d+$`，与客户端 `CompareVersion` 忽略第四段的口径一致——放行四段会让 `v1.2.3` 与 `v1.2.3.1` 被判为同一版本，用户永远收不到后者的更新提示。
 - **`scripts/dist/Start.ps1` 用 `$env:ProgramW6432` 而非 `$env:ProgramFiles`** 定位 .NET 运行时目录：32 位 PowerShell 宿主下后者指向 `Program Files (x86)`，而 x64 运行时装在 `Program Files`，会误判为未安装并重复下载安装。
 - **`.gitignore` 的 `dist` 必须写成 `/dist`**：无锚点的 `dist` 会连 `scripts/dist/`（打包进 zip 的启动脚本）一起忽略，导致 CI 组装 staging 目录失败。
+
+## 单实例、开机自启与安装实现要点
+
+涉及文件：`SingleInstance.cs`（单实例互斥 + 广播唤起）、`AutoStartManager.cs`（计划任务）、`ForegroundActivator.cs`（前台激活，见「两套热键机制」）、`MainWindow.cs`（`autostart` 内置命令 + 托盘项 + 热键气泡）、`Program.cs`（Main 单实例判定 + 自启维护开关）、`StartupArgs.cs`（`--install-autostart`/`--uninstall-autostart`）、`scripts/install.ps1`、`scripts/dist/Install.cmd`、`scripts/release.ps1`。
+
+- **为什么必须用计划任务而不是 HKCU\Run**：`app.manifest` 是 `requireAdministrator`，登录时由 Run 键启动会**静默失败**（不弹 UAC）。任务 XML 关键项：`RunLevel=HighestAvailable`、`LogonTrigger` + `Delay=PT20S`（避开登录高峰，与「启动后延迟 30s 查更新」同款克制）、`ExecutionTimeLimit=PT0S`（不设执行时长上限）、电池策略全关（`DisallowStartIfOnBatteries=false`/`StopIfGoingOnBatteries=false`）。取 exe 路径用 `Environment.ProcessPath`（`PublishSingleFile` 下 `Assembly.Location` 是空串，同更新小节）。
+- **任务 XML 必须以 UTF-16(Unicode) 写盘**：`schtasks /XML` 不认 UTF-8，会报「不是有效的 XML」——`File.WriteAllText(path, xml, Encoding.Unicode)`。路径/用户名插入 XML 前用 `SecurityElement.Escape` 转义，避免 `&` 等字符破坏 XML。
+- **`IsEnabled()` 只看 schtasks 退出码、不解析输出**：中文系统输出是 GBK，.NET Core 默认不带该代码页，解析会乱码/异常。副作用：「任务存在但被用户手动禁用」会被当成已启用（`/Query` 对禁用任务仍返回 0）。
+- **`IsEnabled()` 会起 schtasks 子进程，绝不能放热路径**：`RefreshCommandList` 每敲一个字符就跑一遍，故 `MainWindow` 用 `_autoStartEnabled` 缓存。启动时那次经 `RefreshAutoStartStateAsync` 丢后台线程查、回填时 `Dispatcher.BeginInvoke` 切回 UI 线程——它在启动阶段的唯一用途只是渲染 autostart 命令的描述文本，不值得让程序就绪时间同步等一个子进程；托盘菜单 `Opening` 与 `ToggleAutoStart` 需要即时准确，仍走同步查询。
+- **schtasks 超时后排空输出流必须限时**：`ReadToEndAsync` 只有进程退出、管道关闭才完成，`Kill` 万一失败而进程仍僵死，无限的 `Task.WaitAll` 会挂住调用线程——而 `IsEnabled()` 是 UI 线程同步调用的，那就是界面冻结。故超时路径用 `Task.WaitAll(..., StreamDrainTimeoutMs)` 且吞掉异常（该路径本就丢弃输出，不吞会留下未观察的 Task 异常刷 ERROR 日志）。
+- **单实例**：命名 Mutex（`Local\` 而非 `Global\`——实例冲突只发生在同一登录会话，`Local\` 权限更低、多用户机器不易互相干扰）+ `RegisterWindowMessage` 广播唤起（第二个实例通知已有实例弹出命令面板后静默退出）。坑：必须捕获 `AbandonedMutexException`（旧进程被 `Stop-Process -Force` 强杀时所有权已转移，应视为获取成功）；`ReleaseMutex` 只能在持有所有权时调用、否则抛 `ApplicationException`；监听窗口 `WndProc` **必须先排除消息 ID 为 0**——`RegisterWindowMessage` 失败返回 0，而 0 就是 `WM_NULL`，系统和本程序的挂起探测（`ForegroundActivator.IsWindowHung`）都会发 `WM_NULL`，不排除会让面板被随机弹出。本程序恒以管理员运行、两实例完整性级别相同，广播不会被 UIPI 过滤，无需 `ChangeWindowMessageFilterEx`。
+- **只有「用户重复启动」才广播唤起**：拿不到互斥量时若带着 `--wait-for-pid`（自动更新重启，说明旧进程超时仍未退出），广播就成了「让正在被更新掉的旧实例弹出命令面板」——更新中断、动作语义也完全不对。该场景静默退出并记 WARN，把机会留给下次更新检查（exe 已替换，下次启动即新版本）。
+- **`previousForeground` 可能是 0**：记录那一刻系统确实没有前台窗口时就是 0，照直用就没有线程可 `AttachThreadInput`。故 `ForegroundActivator.ForceForeground` 在它为 0 或就是自己时，回退用**此刻的**前台窗口做附加目标——附加只为借一个别的输入队列解锁，用哪个窗口都成立，排除自己即可；连一个可附加窗口都没有（`foreThread == 0`）时走 `SwitchToThisWindow` 兜底。
+- **排查激活问题前先确认桌面没锁**：锁屏时活动输入桌面是 Winlogon 而非本进程所在的 Default 桌面，`GetForegroundWindow()` 恒返回 0、`SetForegroundWindow` 必然失败，日志里会刷出「首次激活失败，开始短间隔重试」「多次激活失败」——这是锁屏的必然结果，不是缺陷，据此改代码等于追一个不存在的 bug。判定方法：`LogonUI.exe` 是否在跑，或 `OpenInputDesktop` 是否失败。
+- **互斥量等待时长分两档**：`--wait-for-pid`（自动更新重启）等 5 秒（旧进程可能仍在退出的最后阶段），普通重复启动只等 500ms——否则用户双击后会有几秒「什么都没发生」的空窗期。
+- **`--install-autostart` / `--uninstall-autostart`**：只做计划任务注册/注销后退出（退出码 0/1 供脚本判断），不创建 `App`、不占用热键/钩子/托盘，可在程序运行期间被安装脚本安全调用。计划任务的 XML 细节只保留 `AutoStartManager` 一份实现，脚本不重复造轮子（`scripts/install.ps1` 直接 `Start-Process -Verb RunAs -ArgumentList '--install-autostart'`）。
+- **安装目录选 `%LOCALAPPDATA%\Programs`**：按用户安装的约定位置（VS Code、Git 等默认也在此）、当前用户天然可写，自动更新原地自替换 exe（`UpdateInstaller` 有写权限预检）才能成功；`Program Files` 会因无写权限被更新流程直接拒绝。
+- **新增命令行参数只改 `StartupArgs` 一处**（既有约定仍然成立，本次新增两个开关 `--install-autostart`/`--uninstall-autostart` 就是照此办理；未知 `--` 参数仍被 `Parse` 忽略）。注意 `--uninstall-autostart` 目前在仓库内没有调用方，是刻意保留的对称开关（卸载/清理脚本注销计划任务的唯一入口），不是漏接线。
+- **`release.ps1` 回滚 csproj 必须写成 `git checkout HEAD -- <csproj>`**：不带 `HEAD` 的 `git checkout -- <path>` 是从**暂存区**恢复工作区。回滚停在 `VersionWritten` 阶段时 `git add` 可能已经执行过（add 成功、commit 失败，如未配 `user.email`／hook 拒绝／签名失败），此时暂存区里正是要回滚掉的新版本号——不带 `HEAD` 会把工作区也刷成新版本、暂存区还留着改动，却照常打印「回滚完成」。
 
 ## 日志
 
@@ -146,7 +172,7 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 
 **全局未处理异常兜底**（`App.OnStartup` 最开头调用 `RegisterGlobalExceptionHandlers`）：注册三类处理器统一记 ERROR 日志，避免异常静默丢失——`DispatcherUnhandledException`（记 ERROR 后 `e.Handled = true`，让常驻托盘程序继续存活）、`AppDomain.CurrentDomain.UnhandledException`（记 ERROR 并附 `IsTerminating`，无法阻止终止）、`TaskScheduler.UnobservedTaskException`（记 ERROR 后 `SetObserved()`）。处理器内写日志代码自身用 try/catch 包住防递归。原先只有 `Program.Main` 对 `app.Run()` 的 try/catch 兜底，Dispatcher 回调 / 后台线程 / 未观察 Task 的异常不留日志、排查困难。
 
-**关键路径日志约定**：`ShowHistory` 记 INFO「弹出前前台窗口」、首次激活失败记 WARN「开始短间隔重试」（每次唤出最多一条）、跳过 attach / UIA 超时或失败均记 WARN；刻意避开 `SelectionChanged` 等高频路径以免刷屏。
+**关键路径日志约定**：`ShowHistory` 记 INFO「弹出前前台窗口」、首次激活失败记 WARN「开始短间隔重试」（每次唤出最多一条）、跳过 attach / UIA 超时或失败均记 WARN；`HotKeyListener` 收到 `WM_HOTKEY` 记一条 INFO、`MainWindow.ShowWindow` 记一条带位置/尺寸/弹出前前台窗口的 INFO——排查「按了热键没反应」的分水岭：日志里没有 `WM_HOTKEY` = 按键根本没到（热键被别的程序抢注、或被更前面的低级钩子吞掉）；有 `WM_HOTKEY` 和唤出日志但用户没看到窗口 = 位置或激活的问题；刻意避开 `SelectionChanged` 等高频路径以免刷屏。
 
 ## 其它
 
