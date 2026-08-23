@@ -143,5 +143,42 @@ namespace CommandLauncher
             y = Math.Max(canvas.Top, Math.Min(y, canvas.Bottom - magSize.Height));
             return new Point(x, y);
         }
+
+        /// <summary>
+        /// 文字便签贴图的内容区尺寸自适应（DIP，不含描边/内边距，调用方自行加 chrome）：
+        /// 宽高均取测量值向上取整后钳在 [min, max]。
+        /// **向上取整对宽高都是必须的**：窗口尺寸最终要落成整数设备像素，留着小数会在取整时
+        /// 被抹掉，内容区随之短那么零点几像素，ScrollViewer 就会判定内容超出、弹出多余的滚动条。
+        /// 高度（取整后）超出上限即意味着内容需要竖向滚动（经 needsScroll 报告给调用方），
+        /// 此时再给宽度补上滚动条宽度（否则滚动条会压掉同等宽度的内容、把行尾字裁掉），
+        /// 补完仍不越宽度上限。
+        /// </summary>
+        /// <param name="measured">按 maxContentWidth 约束测量出的内容尺寸</param>
+        /// <param name="scrollBarWidth">竖向滚动条宽度，仅在需要滚动时计入</param>
+        /// <param name="needsScroll">高度是否被钳到上限（即内容需要竖向滚动）</param>
+        public static Size FitTextPinContent(
+            Size measured,
+            double minContentWidth, double maxContentWidth,
+            double minContentHeight, double maxContentHeight,
+            double scrollBarWidth,
+            out bool needsScroll)
+        {
+            // 上限本身可能比下限还小（极窄/极矮的工作区），此时以上限为准，保证结果不越界
+            double loW = Math.Min(minContentWidth, maxContentWidth);
+            double loH = Math.Min(minContentHeight, maxContentHeight);
+
+            double w = Math.Clamp(Math.Ceiling(measured.Width), loW, maxContentWidth);
+
+            // 先取整再判超限：让 needsScroll 与「补滚动条宽度」用同一个判据，不会一个说要滚、
+            // 另一个说不用（闭区间——恰好等于上限视为放得下，不算需要滚动）
+            double h = Math.Ceiling(measured.Height);
+            needsScroll = h > maxContentHeight;
+            h = Math.Clamp(h, loH, maxContentHeight);
+
+            if (needsScroll) // 需要滚动：让出滚动条宽度
+                w = Math.Min(w + scrollBarWidth, maxContentWidth);
+
+            return new Size(w, h);
+        }
     }
 }

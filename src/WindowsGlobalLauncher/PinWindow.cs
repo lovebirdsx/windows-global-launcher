@@ -23,8 +23,10 @@ namespace CommandLauncher
     /// 为「DIP」。换算方向：物理 = DIP × DpiScale，故物理 → DIP 一律用除法。
     /// 图片初始按 1:1 物理像素显示：基准 DIP 尺寸 = 像素尺寸 ÷ DpiScale，且必须用
     /// PixelWidth/PixelHeight（剪贴板图片的 DPI 元数据会让 BitmapSource.Width/Height 不可靠）。
-    /// 文本贴图尺寸为 DIP 语义（DPI 无关）：宽固定 TextWidthDip、高按内容测量并钳制在工作区内。
-    /// 构造时读一次 GetDpi，Loaded 后再读一次，若不同（目标显示器 DPI 与初始不同）则按新值校正一次。
+    /// 文本贴图尺寸为 DIP 语义（DPI 无关）：宽高均按内容测量后钳制——宽在
+    /// [MinTextWidthDip, TextWidthDip] 且不超所在屏工作区宽，高在 [MinTextHeightDip, 工作区高 60%]。
+    /// 构造时读一次 GetDpi，Loaded 后再读一次，若不同（目标显示器 DPI 与初始不同）则按新值校正一次；
+    /// 拖动结束时也刷新一次（贴图可能被拖到另一 DPI 的显示器上）。
     /// </remarks>
     public sealed class PinWindow : Window
     {
@@ -48,11 +50,14 @@ namespace CommandLauncher
         private const double BorderDip = 2.0; // 双侧各 1 DIP 描边，计算内容可视区时扣除
 
         // ---- 文本贴图参数 ----
-        private const double TextWidthDip = 480.0;     // 文本贴图初始宽度（DIP），受所在屏工作区约束
+        private const double TextWidthDip = 480.0;     // 文本贴图宽度上限（DIP），受所在屏工作区约束
         private const double TextMaxHeightRatio = 0.6; // 文本贴图高度上限 = 所在屏工作区高的 60%
         private const double TextPaddingDip = 10.0;    // 文本内容内边距
         private const double TextCornerRadius = 8.0;   // 文本贴图圆角（图片贴图保持 0 保证像素完整）
         private const double MinTextHeightDip = 20.0;  // 极短文本的最小内容高度
+        private const double MinTextWidthDip = 120.0;  // 极短文本的最小内容宽度（容得下几个汉字，也不至于被提示角标挡满）
+        private const double CaretSlackDip = 2.0;      // 编辑态测量宽度余量：TextBox 比 TextBlock 多占一个插入符宽度
+        private const double ScrollBarWidthDip = 8.0;  // 竖向滚动条宽度，与 TextScrollViewer 扁平样式里的 Width="8" 对应，改一处要同步另一处
         private static readonly Brush TextBackgroundBrush = Freeze(new SolidColorBrush(Color.FromArgb(240, 30, 30, 30))); // 同剪贴板历史预览窗
 
         // 内容模式：图片（既有行为）或文本（便签）
@@ -141,11 +146,31 @@ namespace CommandLauncher
         private readonly TextBlock? _textBlock = null;   // 文本模式非空（展示态）
         private readonly TextBox? _editBox = null;       // 文本模式非空（编辑态）
         private readonly ScrollViewer? _textScroll = null; // 文本模式非空（展示/编辑切换 Content）
+        // 测量专用 TextBlock（文本模式非空）：故意永不加入任何可视/逻辑树。
+        // WPF 对已从可视树摘下的元素调 Measure 是 no-op（只留 dirty 标记、DesiredSize 停在旧值），
+        // 而 _textBlock 在编辑态恰好被 _editBox 换了出去——用它测量会拿到过期尺寸（历史 bug：
+        // 编辑保存后窗口尺寸纹丝不动）。改用这个从未入树的块，测量与「元素在不在树上」彻底解耦。
+        private readonly TextBlock? _measureBlock = null;
         private bool _isEditing;                         // 文本模式编辑态标志
+        private double _editMinWidthDip;                 // 编辑态宽度下限（= 进入编辑时的窗口宽），编辑中只增不减
         private readonly Border _border;
         private Border _hint = null!;                    // 左上角的缩放/透明度提示角标（不响应命中测试，InitChrome 赋值）
         private TextBlock _hintText = null!;
         private DispatcherTimer _hintTimer = null!;
+
+        // ---- 拖动状态（见 OnMouseLeftButtonDown 注释：刻意不用 Window.DragMove）----
+        private bool _dragPending;                       // 左键已按下、尚未松开
+        private bool _dragging;                          // 已越过拖动阈值、正在移动窗口
+        private System.Drawing.Point _dragStartCursor;   // 按下时的光标位置（物理像素）
+        private double _dragStartLeft, _dragStartTop;    // 按下时的窗口位置（DIP）
+        private double _dragScaleX = 1.0, _dragScaleY = 1.0; // 按下时的 DPI 缩放快照，整段拖动锁定同一值
+
+        // ---- 自己做的双击判定（见 OnMouseLeftButtonDown 注释：不能信 e.ClickCount）----
+        private const int MinHumanDoubleClickMs = 50;    // 人手双击的最快间隔下限，低于它的必是合成输入
+        private long _lastPressTicks = -100_000;         // 上一次「被认可的」左键按下时刻
+        private int _lastPressTimestamp = int.MinValue;  // 上一次按下的 WPF 消息时间戳（同值 = 同一次输入被重报）
+        private System.Drawing.Point _lastPressCursor;   // 上一次按下时的光标（物理像素）
+        private bool _sawReleaseSincePress = true;       // 上次按下之后是否见过释放（初始 true，首击不受影响）
 
         private readonly System.Drawing.Point _initialPhysicalTopLeft; // 初始位置（物理像素），Loaded 校正 DPI 时用
         private double _dpiScaleX = 1.0;
@@ -228,6 +253,12 @@ namespace CommandLauncher
                 Foreground = Brushes.White,
                 TextWrapping = TextWrapping.Wrap,
             };
+            // 测量副本：排版相关属性与 _textBlock 保持一致（FontFamily 两者同为继承默认值，不显式设）
+            _measureBlock = new TextBlock
+            {
+                FontSize = 13,
+                TextWrapping = TextWrapping.Wrap,
+            };
             _textScroll = new TextScrollViewer
             {
                 Content = _textBlock,
@@ -253,6 +284,7 @@ namespace CommandLauncher
             };
             _editBox.PreviewKeyDown += OnEditBoxPreviewKeyDown;
             _editBox.LostKeyboardFocus += OnEditBoxLostFocus;
+            _editBox.TextChanged += OnEditBoxTextChanged;
             _border = new Border
             {
                 BorderThickness = new Thickness(1),
@@ -371,6 +403,9 @@ namespace CommandLauncher
 
             // 输入：左键拖动 / 双击关闭 / Esc 关闭 / 滚轮缩放与调透明度
             MouseLeftButtonDown += OnMouseLeftButtonDown;
+            MouseMove += OnMouseMoveDrag;
+            MouseLeftButtonUp += OnMouseLeftButtonUpDrag;
+            LostMouseCapture += (s, e) => EndDrag();
             KeyDown += OnKeyDown;
 
             _hintTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(HintHideMs) };
@@ -456,40 +491,204 @@ namespace CommandLauncher
             Top = newT / _dpiScaleY;
         }
 
-        // 测量折行后的内容尺寸并应用：宽固定 TextWidthDip（受窗口当前所在屏工作区约束）；
-        // 高 = 测量值，下限 MinTextHeightDip、上限工作区高 60%，超高由 ScrollViewer 滚动。
-        // 构造时、Loaded DPI 校正后、编辑落定后各调一次（构造时 GetDpi 可能取到非目标显示器，一并重算）。
-        private void ApplyTextSize()
+        /// <summary>
+        /// 按内容重算并应用文本贴图的窗口尺寸（宽高都自适应）。
+        /// 宽：内容自然宽度，钳在 [MinTextWidthDip, TextWidthDip] 且不超所在屏工作区宽；
+        /// 高：折行后内容高度，钳在 [MinTextHeightDip, 工作区高 60%]，超出由 ScrollViewer 滚动。
+        /// 构造时、Loaded DPI 校正后、编辑中每次输入、编辑落定/取消后各调一次
+        /// （构造时 GetDpi 可能取到非目标显示器，一并重算）。
+        /// 测量固定走永不入树的 _measureBlock，故不受「_textBlock 此刻在不在可视树上」影响。
+        /// 最终宽高经 SnapUpToPixel 向上取整到整数物理像素，见该函数注释。
+        /// </summary>
+        /// <param name="editingText">编辑态传 TextBox 的当前文本；null 表示按已落定的 _text 测量</param>
+        private void ApplyTextSize(string? editingText = null)
         {
             // 用窗口当前位置所在屏（贴图可能已被拖到其它屏），物理像素坐标
             var winPt = new System.Drawing.Point((int)(Left * _dpiScaleX), (int)(Top * _dpiScaleY));
             var wa = System.Windows.Forms.Screen.FromPoint(winPt).WorkingArea;
-            double maxWDip = Math.Min(TextWidthDip, wa.Width / _dpiScaleX); // 物理 → DIP 用除法
-            double textW = maxWDip - BorderDip - TextPaddingDip * 2;        // 扣除两侧描边与内边距，与布局约束一致
-            _textBlock!.Measure(new Size(textW, double.PositiveInfinity));
-            double maxHDip = wa.Height / _dpiScaleY * TextMaxHeightRatio;
-            double textH = Math.Min(Math.Max(_textBlock.DesiredSize.Height, MinTextHeightDip), maxHDip);
-            Width = maxWDip;
-            Height = textH + BorderDip + TextPaddingDip * 2;
+
+            double chromeW = BorderDip + TextPaddingDip * 2; // 两侧描边 + 内边距，内容区之外的固定开销
+            double chromeH = chromeW;
+            double maxContentW = Math.Min(TextWidthDip, wa.Width / _dpiScaleX) - chromeW;  // 物理 → DIP 用除法
+            double maxContentH = wa.Height / _dpiScaleY * TextMaxHeightRatio - chromeH;
+            maxContentW = Math.Max(maxContentW, 1);
+            maxContentH = Math.Max(maxContentH, 1);
+
+            // 编辑态测量宽度留出插入符余量：TextBox 比 TextBlock 多占一点宽，宁可算宽/算高也不裁内容
+            double measureW = editingText == null ? maxContentW : Math.Max(maxContentW - CaretSlackDip, 1);
+            _measureBlock!.Text = editingText ?? _text;
+            _measureBlock.Measure(new Size(measureW, double.PositiveInfinity));
+
+            var content = ScreenshotGeometry.FitTextPinContent(
+                _measureBlock.DesiredSize,
+                MinTextWidthDip, maxContentW,
+                MinTextHeightDip, maxContentH,
+                ScrollBarWidthDip,
+                out bool needsScroll);
+
+            double contentW = content.Width;
+            if (editingText != null)
+                // 测量时扣掉的插入符余量必须加回来，否则 TextBox 拿到的宽度只够 TextBlock 用，
+                // 会比测量结果提前一个词折行、凭空多出一行
+                contentW = Math.Min(contentW + CaretSlackDip, maxContentW);
+
+            double width = contentW + chromeW;
+            if (editingText != null)
+                width = Math.Max(width, _editMinWidthDip); // 编辑中宽度只增不减，避免退格删字时窗口左右跳、光标跟着抖
+
+            Width = SnapUpToPixel(width, _dpiScaleX);
+            Height = SnapUpToPixel(content.Height + chromeH, _dpiScaleY);
+
+            // 滚动条只在真的钳过高度时才出现，不交给 ScrollViewer 自己按浮点比较去猜；
+            // Hidden 仍保留滚轮/键盘滚动能力。编辑态两层（外层 ScrollViewer 与 TextBox 自身）都要管。
+            var bar = needsScroll ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden;
+            _textScroll!.VerticalScrollBarVisibility = bar;
+            _editBox!.VerticalScrollBarVisibility = bar;
         }
 
+        /// <summary>
+        /// DIP 尺寸向上取整到整数物理像素。
+        /// 窗口尺寸最终要经 SetWindowPos 落成整数设备像素，小数部分会被抹掉——内容区随之短那么
+        /// 零点几像素，恰好贴合内容的布局就变成了「装不下」，ScrollViewer 于是弹出多余的滚动条。
+        /// 宽度早先没暴露这个问题，只是因为它在 FitTextPinContent 里已经 Math.Ceiling 过。
+        /// </summary>
+        private static double SnapUpToPixel(double dip, double scale)
+            => scale > 0 ? Math.Ceiling(dip * scale) / scale : Math.Ceiling(dip);
+
+        // 左键按下：双击关闭，单击开始拖动。三处刻意的反直觉做法，改动前请先读完：
+        //
+        // ① 双击判定**不能用 e.ClickCount**。贴图是 ShowActivated=false 弹出的，刚钉出来时是
+        //    非活动窗口，用户第一次点它属于「激活点击」——WPF 输入层对 provider 处于 !_active
+        //    时收到的输入有一整套补偿逻辑（HwndMouseInputProvider 补报 Activate 并同步按键状态），
+        //    这一次物理按下会被 MouseDevice 计成两次 press，e.ClickCount 直接变成 2、命中关闭
+        //    分支——表现为「刚钉出来的贴图点一下就没了」。而同时开着两个贴图时，先关掉的那个把
+        //    激活权交给了兄弟窗口，剩下那个已是活动窗口、点击计数正常，于是「两个里总有一个
+        //    关不掉」。改为自己配对判定：只有「按下 → 释放 → 再按下」这样一个完整循环、且间隔
+        //    落在人手做得到的区间内，才算双击（实测幽灵按下的间隔是 0~16ms）。
+        // ② 拖动刻意不用 Window.DragMove()：它是阻塞的 Win32 模态移动循环
+        //    （WM_SYSCOMMAND/SC_MOUSEMOVE），会把真正的 WM_LBUTTONUP 吃在循环里，WPF 的
+        //    MouseDevice 从未看到这次释放，同样会污染点击计数。改为鼠标捕获 + 手动移位后，
+        //    WPF 能收到完整的 down → move → up。
+        // ③ **按下时不 CaptureMouse**，推迟到真正越过拖动阈值时（见 OnMouseMoveDrag）：
+        //    `IMouseInputProvider.CaptureMouse()` 里正有一段 `!_active` 的补偿代码，在窗口尚未
+        //    激活时调用它就是上面那个幽灵按下的触发点。等真正开始拖动时窗口早已激活，不会触发。
         private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             if (_mode == ContentMode.Text && _isEditing)
                 return; // 编辑中：鼠标交给 TextBox（光标/选区），点击外部经失焦落定，窗口不拖动、双击不关闭
-            if (e.ClickCount == 2) // 双击左键关闭
+
+            long now = Environment.TickCount64;
+            var cur = System.Windows.Forms.Cursor.Position; // 物理像素（PerMonitorV2）
+
+            if (_dragPending)
             {
+                // 上一次按下还没等到释放就又来一次。紧随其后（幽灵按下实测 0~16ms）的必是激活补偿
+                // 灌进来的合成按下，丢弃；隔了很久才来则说明上一次的 MouseUp 落到了窗口外、
+                // 状态陈旧（按下时不捕获鼠标，见注释 ③），就地复位继续处理，避免卡成永远关不掉。
+                if (now - _lastPressTicks <= MinHumanDoubleClickMs)
+                {
+                    Logger.LogInfo("贴图忽略未成对的重复按下（窗口激活时的合成点击）");
+                    return;
+                }
+                Logger.LogInfo("贴图检测到陈旧的未完成按下状态，已复位");
+                _dragPending = false;
+                _dragging = false;
+                _sawReleaseSincePress = true;
+            }
+
+            var slop = System.Windows.Forms.SystemInformation.DoubleClickSize;
+            long elapsed = now - _lastPressTicks;
+            bool isDoubleClick =
+                _sawReleaseSincePress &&
+                e.Timestamp != _lastPressTimestamp &&          // 同一消息时间戳 = 同一次输入被重报
+                elapsed >= MinHumanDoubleClickMs &&            // 快过人手极限的必是合成输入
+                elapsed <= System.Windows.Forms.SystemInformation.DoubleClickTime &&
+                Math.Abs(cur.X - _lastPressCursor.X) <= slop.Width &&
+                Math.Abs(cur.Y - _lastPressCursor.Y) <= slop.Height;
+
+            _lastPressTicks = now;
+            _lastPressTimestamp = e.Timestamp;
+            _lastPressCursor = cur;
+            _sawReleaseSincePress = false;
+
+            if (isDoubleClick)
+            {
+                Logger.LogInfo($"贴图双击关闭（两次按下间隔 {elapsed}ms）");
                 Close();
                 return;
             }
-            try
+
+            var dpi = VisualTreeHelper.GetDpi(this);
+            _dragScaleX = dpi.DpiScaleX;
+            _dragScaleY = dpi.DpiScaleY;
+            _dragStartCursor = cur;
+            _dragStartLeft = Left;
+            _dragStartTop = Top;
+            _dragPending = true; // 见 ③：此处刻意不 CaptureMouse
+            _dragging = false;
+        }
+
+        // 拖动中：越过系统拖动阈值才真正移动，避免双击时的手抖把窗口挪走。
+        // 用「按下时的光标/窗口位置 + 当前光标」绝对定位，不累积误差；DPI 用按下时的快照，
+        // 跨不同 DPI 显示器拖动时也不会中途跳变。
+        private void OnMouseMoveDrag(object sender, MouseEventArgs e)
+        {
+            // 兜底（不依赖 _dragPending）：捕获丢失后真正的 MouseUp 可能落在别的窗口上，
+            // 靠这里恢复「已见过释放」，否则双击判定会卡死成永远关不掉
+            if (!_sawReleaseSincePress && e.LeftButton != MouseButtonState.Pressed)
+                _sawReleaseSincePress = true;
+
+            if (!_dragPending)
+                return;
+            if (e.LeftButton != MouseButtonState.Pressed)
             {
-                DragMove(); // 左键按下拖动
+                EndDrag();
+                return;
             }
-            catch (InvalidOperationException)
+
+            var cur = System.Windows.Forms.Cursor.Position;
+            double dx = cur.X - _dragStartCursor.X;
+            double dy = cur.Y - _dragStartCursor.Y;
+            if (!_dragging)
             {
-                // 按键状态异常时 DragMove 可能抛错，忽略即可
+                // 阈值是 DIP 语义的系统参数，与物理位移比较前换算成物理像素
+                if (Math.Abs(dx) < SystemParameters.MinimumHorizontalDragDistance * _dragScaleX &&
+                    Math.Abs(dy) < SystemParameters.MinimumVerticalDragDistance * _dragScaleY)
+                    return;
+                _dragging = true;
+                // 到这里窗口早已激活，CaptureMouse 不会再踩 WPF 的 !_active 补偿块
+                // （见 OnMouseLeftButtonDown 注释 ③）；失败也继续，拖动时光标基本还在窗口内
+                CaptureMouse();
             }
+
+            Left = _dragStartLeft + dx / _dragScaleX; // 物理 → DIP 用除法
+            Top = _dragStartTop + dy / _dragScaleY;
+        }
+
+        // 真正的左键释放 —— 唯一可信的「用户松手」信号，无条件标记（不看 _dragPending）
+        private void OnMouseLeftButtonUpDrag(object sender, MouseButtonEventArgs e)
+        {
+            _sawReleaseSincePress = true;
+            EndDrag();
+        }
+
+        // 结束拖动并归还捕获。**刻意不在这里置 _sawReleaseSincePress**：本方法也挂在
+        // LostMouseCapture 上，而丢失捕获不等于用户松手——第二轮修复正是栽在这里
+        // （激活流程夺走捕获 → 误标「已释放」→ 紧随其后的幽灵按下被判成双击 → 单击关窗）。
+        // 顺带刷新 DPI 缩放：贴图可能被拖到另一 DPI 的显示器上，
+        // 后续 ApplyTextSize / ClampOutsideToNearestScreen 的物理 ↔ DIP 换算要用新值。
+        private void EndDrag()
+        {
+            if (!_dragPending)
+                return;
+            _dragPending = false;
+            _dragging = false;
+            if (IsMouseCaptured)
+                ReleaseMouseCapture();
+
+            var dpi = VisualTreeHelper.GetDpi(this);
+            _dpiScaleX = dpi.DpiScaleX;
+            _dpiScaleY = dpi.DpiScaleY;
         }
 
         private void OnKeyDown(object sender, KeyEventArgs e)
@@ -506,6 +705,7 @@ namespace CommandLauncher
             if (_mode != ContentMode.Text || _isEditing)
                 return;
             _isEditing = true;
+            _editMinWidthDip = Width; // 编辑中宽度只增不减的下限
             _editBox!.Text = _text;
             _textScroll!.Content = _editBox;
             _border.BorderBrush = HoverBorderBrush;
@@ -515,20 +715,22 @@ namespace CommandLauncher
             _editBox.SelectAll();
         }
 
-        // 退出编辑态并落定：cancel=true 丢弃修改恢复原文本；否则保存新文本并重测窗口尺寸（内容增减会改变高度）。
+        // 退出编辑态并落定：cancel=true 丢弃修改恢复原文本；否则保存新文本。
+        // 两种情况都要重测窗口尺寸——编辑期间窗口已按 TextBox 内容伸缩过，取消时同样得还原成原文对应的尺寸。
         // 先置 _isEditing=false 再切换 Content，避免 Content 切换引发的 LostKeyboardFocus 重入
         private void ExitEditMode(bool cancel)
         {
             if (!_isEditing)
                 return;
             _isEditing = false;
+            _editMinWidthDip = 0; // 解除「只增不减」下限，落定后允许按内容缩窄
             if (!cancel)
             {
                 _text = _editBox!.Text;
                 _textBlock!.Text = _text;
-                ApplyTextSize();
                 Logger.LogInfo($"文本贴图编辑已保存：{_text.Length} 字符");
             }
+            ApplyTextSize();
             _textScroll!.Content = _textBlock;
             _border.BorderBrush = NormalBorderBrush;
             ContextMenu = BuildContextMenu();
@@ -555,6 +757,13 @@ namespace CommandLauncher
         {
             if (_isEditing)
                 ExitEditMode(cancel: false);
+        }
+
+        // 编辑中每次输入都按当前内容重算窗口尺寸（宽只增不减、高实时跟随，到上限后由 ScrollViewer 滚动）
+        private void OnEditBoxTextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (_isEditing)
+                ApplyTextSize(_editBox!.Text);
         }
 
         // 滚轮：Ctrl=调透明度（两模式共用）；普通滚轮——图片模式缩放（锚点为鼠标位置），

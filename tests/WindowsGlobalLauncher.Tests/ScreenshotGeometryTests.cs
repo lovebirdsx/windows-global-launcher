@@ -167,5 +167,54 @@ namespace WindowsGlobalLauncher.Tests
 
             Assert.Equal(new Point(ex, ey), result);
         }
+
+        // 文字便签内容区自适应。统一参数：宽 [100, 460]、高 [20, 500]、滚动条 8。
+        [Theory]
+        [InlineData(30, 18, 100, 20)]        // 极短文本：宽高均取下限
+        [InlineData(200.2, 40, 201, 40)]     // 常规：宽向上取整
+        [InlineData(200.2, 69.33, 201, 70)]  // 高也必须向上取整：留着小数会在窗口取整时被抹掉，凭空长出滚动条
+        [InlineData(460, 300, 460, 300)]     // 恰好贴住宽度上限：不加滚动条
+        [InlineData(300, 500, 300, 500)]     // 高恰好等于上限：闭区间，不算需要滚动、不加滚动条宽度
+        [InlineData(900, 100, 460, 100)]     // 测量宽越上限（理论上不会发生）：钳回上限
+        public void FitTextPinContent_WithinLimits_ClampsWithoutScrollBar(
+            double mw, double mh, double ew, double eh)
+        {
+            Size result = ScreenshotGeometry.FitTextPinContent(
+                new Size(mw, mh), 100, 460, 20, 500, 8, out bool needsScroll);
+
+            Assert.Equal(new Size(ew, eh), result);
+            Assert.False(needsScroll);
+        }
+
+        [Fact]
+        public void FitTextPinContent_ContentTallerThanMax_ClampsHeightAndWidensForScrollBar()
+        {
+            Size result = ScreenshotGeometry.FitTextPinContent(
+                new Size(300, 900), 100, 460, 20, 500, 8, out bool needsScroll);
+
+            Assert.Equal(new Size(308, 500), result); // 高钳到 500，宽 300+8 让出滚动条
+            Assert.True(needsScroll);
+        }
+
+        [Fact]
+        public void FitTextPinContent_ScrollBarWidening_NeverExceedsMaxWidth()
+        {
+            Size result = ScreenshotGeometry.FitTextPinContent(
+                new Size(458, 900), 100, 460, 20, 500, 8, out bool needsScroll);
+
+            Assert.Equal(new Size(460, 500), result); // 458+8=466 → 钳回上限 460
+            Assert.True(needsScroll);
+        }
+
+        [Fact]
+        public void FitTextPinContent_MaxSmallerThanMin_ResultStaysWithinMax()
+        {
+            // 极窄/极矮工作区：上限小于下限时以上限为准，不能反而放大到下限
+            Size result = ScreenshotGeometry.FitTextPinContent(
+                new Size(10, 5), 100, 60, 20, 15, 8, out bool needsScroll);
+
+            Assert.Equal(new Size(60, 15), result);
+            Assert.False(needsScroll);
+        }
     }
 }
