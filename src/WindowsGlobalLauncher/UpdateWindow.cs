@@ -671,10 +671,15 @@ namespace CommandLauncher
             style.Setters.Add(new Setter(FontSizeProperty, 13.0));
             style.Setters.Add(new Setter(CursorProperty, Cursors.Hand));
 
-            var hover = new Trigger { Property = IsMouseOverProperty, Value = true };
-            hover.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(232, 17, 35)), "border"));
-            hover.Setters.Add(new Setter(ForegroundProperty, Brushes.White));
-            style.Triggers.Add(hover);
+            // 带 TargetName 的 Setter 只能放 Template.Triggers（WPF 限制），改 Border 背景的 hover 触发器挂模板上
+            var hoverTemplate = new Trigger { Property = IsMouseOverProperty, Value = true };
+            hoverTemplate.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(232, 17, 35)), "border"));
+            template.Triggers.Add(hoverTemplate);
+
+            // 改按钮自身 Foreground 的触发器留在 Style.Triggers（无 TargetName，Style 级合法）
+            var hoverStyle = new Trigger { Property = IsMouseOverProperty, Value = true };
+            hoverStyle.Setters.Add(new Setter(ForegroundProperty, Brushes.White));
+            style.Triggers.Add(hoverStyle);
 
             var disabled = new Trigger { Property = IsEnabledProperty, Value = false };
             disabled.Setters.Add(new Setter(ForegroundProperty, new SolidColorBrush(Color.FromRgb(90, 90, 90))));
