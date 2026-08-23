@@ -696,6 +696,13 @@ namespace CommandLauncher
             // 编辑态下 Esc 已被 TextBox 的 PreviewKeyDown 拦截（标 Handled 不会到达此处），此判断为防御
             if (e.Key == Key.Escape && !_isEditing)
                 Close();
+            // F2 进入编辑（仅文本模式、非编辑态）。窗口级 KeyDown 只在窗口是活动窗口时收到按键，
+            // 与「F2 只要在窗口是活动窗口时响应即可」的语义一致；非活动窗口的贴图按 F2 落不到本进程。
+            else if (e.Key == Key.F2 && !_isEditing)
+            {
+                EnterEditMode();
+                e.Handled = true;
+            }
         }
 
         // 进入编辑态：TextBox 替换 TextBlock 显示，描边变蓝提示编辑中，
@@ -710,9 +717,29 @@ namespace CommandLauncher
             _textScroll!.Content = _editBox;
             _border.BorderBrush = HoverBorderBrush;
             ContextMenu = null;
-            _editBox.Focus();
-            Keyboard.Focus(_editBox);
-            _editBox.SelectAll();
+
+            // 贴图是 ShowActivated=false 弹出的非活动窗口，Keyboard.Focus 在非活动窗口上不会向
+            // Win32 要键盘焦点（只记为「激活后待聚焦」），表现为 TextBox 收不到任何按键（方向键、
+            // 打字全落到原前台窗口）。先借 ForegroundActivator 把窗口切到前台再聚焦——与命令
+            // 启动器/剪贴板历史同一套 AttachThreadInput 绕前台锁定的激活路径。
+            // previousForeground 传此刻的前台窗口即可（编辑是用户主动触发，此刻前台就是要借
+            // 输入队列的那个窗口）。
+            var hwnd = new WindowInteropHelper(this).Handle;
+            ForegroundActivator.ForceForeground(hwnd, ForegroundActivator.GetForeground(), "文本贴图");
+
+            // 聚焦推迟到 Dispatcher 下一拍：SetForegroundWindow 成功后，WPF 感知窗口激活
+            // 依赖 WM_ACTIVATE 消息异步回流，同一拍里 Keyboard.Focus 仍按「窗口未激活」走记账
+            // 路径，TextBox 拿不到真实键盘焦点（全选状态下按键无响应、必须鼠标点一下才出光标）。
+            // 等 WM_ACTIVATE 回流后再聚焦，Keyboard.Focus 才会真正向 Win32 要键盘焦点。
+            // SelectAll 也一并推迟——它依赖焦点已落定（否则全选状态会被聚焦过程冲掉）。
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (!_isEditing) // 下一拍到来前用户可能已 Esc/失焦退出编辑
+                    return;
+                _editBox.Focus();
+                Keyboard.Focus(_editBox);
+                _editBox.SelectAll();
+            }), DispatcherPriority.Input);
         }
 
         // 退出编辑态并落定：cancel=true 丢弃修改恢复原文本；否则保存新文本。
