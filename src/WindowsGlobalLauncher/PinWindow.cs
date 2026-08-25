@@ -38,6 +38,14 @@ namespace CommandLauncher
         // _open 清空时在 Closed 处理器中复位，维持不变式「_allHidden == true ⇒ _open 非空且全部隐藏」
         private static bool _allHidden;
 
+        // 框选选中的贴图集合（仅 UI 线程访问）：ApplyBoxSelection 落定、ClearSelection 清空、Closed 移除
+        private static readonly List<PinWindow> _selected = new();
+        // 框选遮罩是否已打开（防重入）
+        private static bool _boxSelecting;
+        // 选中描边：亮白（8 分类色无一为白，绝不混淆）+ 加粗到 2
+        private static readonly Brush SelectedBorderBrush = Freeze(new SolidColorBrush(Colors.White));
+        private const double SelectedBorderThickness = 2.0;
+
         // 描边画刷：常态白色半透明（冻结以便跨实例复用）。悬停表达改用阴影浮起（PinHoverShadow），
         // 不再变蓝描边——蓝色描边与「蓝」便签分类描边同色、无法区分；HoverBorderBrush 保留给编辑态提示用
         private static readonly Brush NormalBorderBrush = Freeze(new SolidColorBrush(Color.FromArgb(90, 255, 255, 255)));
@@ -397,6 +405,7 @@ namespace CommandLauncher
                 Logger.LogInfo("当前无贴图，无需隐藏");
                 return;
             }
+            ClearSelection(); // 整体隐藏后选中无意义，避免 ShowAll 后残留选中描边
             foreach (var w in _open.ToArray()) // 副本遍历，同 CloseAll 先例
                 w.Hide();
             _allHidden = true;
@@ -427,6 +436,89 @@ namespace CommandLauncher
                 ShowAll();
             else
                 HideAll();
+        }
+
+        /// <summary>
+        /// 进入框选态（热键动作 PinBoxSelect / 托盘菜单入口）：弹出全屏橡皮筋遮罩，
+        /// 松手后选中与框相交的可见贴图，之后拖动任一选中贴图即整体移动。
+        /// 无贴图 / 已在框选 / 截图会话进行中（两个全屏窗口叠加无意义）时忽略记日志。
+        /// </summary>
+        public static void StartBoxSelect()
+        {
+            if (_boxSelecting)
+            {
+                Logger.LogWarning("框选遮罩已打开，忽略重复触发（PinBoxSelect）");
+                return;
+            }
+            if (_open.Count == 0)
+            {
+                Logger.LogInfo("当前无贴图，忽略框选移动（PinBoxSelect）");
+                return;
+            }
+            if (ScreenshotManager.IsCapturing)
+            {
+                Logger.LogWarning("截图会话进行中，忽略框选移动（PinBoxSelect）");
+                return;
+            }
+            _boxSelecting = true;
+            var overlay = new PinSelectOverlayWindow();
+            overlay.Closed += (s, e) => _boxSelecting = false;
+            overlay.Show();
+        }
+
+        /// <summary>应用框选结果：先清空旧选中，再收集与选择框（虚拟屏物理像素）相交的可见贴图。</summary>
+        internal static void ApplyBoxSelection(System.Drawing.RectangleF selectRect)
+        {
+            ClearSelection();
+            foreach (var (pin, phys) in EnumerateSelectablePins())
+            {
+                if (!selectRect.IntersectsWith(phys))
+                    continue;
+                _selected.Add(pin);
+                pin.ApplySelectedVisual();
+                // 整体移动的数据源是这里落定的快照：被选成员收不到本次 MouseDown，
+                // 拖动广播要按「框选确定时的位置 + 本次拖动位移」平移它们
+                pin._dragStartLeft = pin.Left;
+                pin._dragStartTop = pin.Top;
+                pin._dragScaleX = pin._dpiScaleX;
+                pin._dragScaleY = pin._dpiScaleY;
+            }
+            Logger.LogInfo($"框选选中 {_selected.Count} 个贴图");
+        }
+
+        /// <summary>清空选中并还原描边（HideAll/重新框选/Esc 取消/Closed 前调用）。</summary>
+        private static void ClearSelection()
+        {
+            foreach (var pin in _selected)
+                pin.ApplyDefaultBorder();
+            _selected.Clear();
+        }
+
+        // 选中视觉：描边亮白 + 厚度 2（与常态/分类描边视觉上明确区分）
+        private void ApplySelectedVisual()
+        {
+            _border.BorderBrush = SelectedBorderBrush;
+            _border.BorderThickness = new Thickness(SelectedBorderThickness);
+        }
+
+        // 还原常态描边：图片 → NormalBorderBrush，文本 → 分类描边；厚度回 1
+        private void ApplyDefaultBorder()
+        {
+            _border.BorderBrush = _mode == ContentMode.Image ? NormalBorderBrush : CategoryBrush(_category);
+            _border.BorderThickness = new Thickness(1);
+        }
+
+        // 供框选命中测试枚举（internal）：隐藏中（IsVisible==false）与编辑中（_isEditing）的贴图不参与
+        internal static List<(PinWindow Pin, System.Drawing.RectangleF Phys)> EnumerateSelectablePins()
+        {
+            var result = new List<(PinWindow, System.Drawing.RectangleF)>();
+            foreach (var pin in _open)
+            {
+                if (!pin.IsVisible || pin._isEditing)
+                    continue;
+                result.Add((pin, pin.PhysicalBounds));
+            }
+            return result;
         }
 
         // ---- 持久化/框选取数用的只读视图（internal，供 PinStore 与后续框选功能共用；仅 UI 线程访问）----
@@ -543,6 +635,7 @@ namespace CommandLauncher
             Closed += (s, e) =>
             {
                 _open.Remove(this);
+                _selected.Remove(this); // 关闭的贴图同时退出框选选中集合（若在其中的话）
                 if (_open.Count == 0)
                     _allHidden = false; // 贴图全部关闭后整体隐藏状态自然结束
                 Logger.LogInfo($"贴图已关闭：{contentDesc}，剩余 {_open.Count} 个");
@@ -625,16 +718,10 @@ namespace CommandLauncher
         /// <param name="editingText">编辑态传 TextBox 的当前文本；null 表示按已落定的 _text 测量</param>
         private void ApplyTextSize(string? editingText = null)
         {
-            // 用窗口当前位置所在屏（贴图可能已被拖到其它屏），物理像素坐标
-            var winPt = new System.Drawing.Point((int)(Left * _dpiScaleX), (int)(Top * _dpiScaleY));
-            var wa = System.Windows.Forms.Screen.FromPoint(winPt).WorkingArea;
+            var (maxContentW, maxContentH) = GetMaxContentSize();
 
             double chromeW = BorderDip + TextPaddingDip * 2; // 两侧描边 + 内边距，内容区之外的固定开销
             double chromeH = chromeW;
-            double maxContentW = Math.Min(TextWidthDip, wa.Width / _dpiScaleX) - chromeW;  // 物理 → DIP 用除法
-            double maxContentH = wa.Height / _dpiScaleY * TextMaxHeightRatio - chromeH;
-            maxContentW = Math.Max(maxContentW, 1);
-            maxContentH = Math.Max(maxContentH, 1);
 
             // 编辑态测量宽度留出插入符余量：TextBox 比 TextBlock 多占一点宽，宁可算宽/算高也不裁内容
             double measureW = editingText == null ? maxContentW : Math.Max(maxContentW - CaretSlackDip, 1);
@@ -659,13 +746,60 @@ namespace CommandLauncher
                 width = Math.Max(width, _editMinWidthDip); // 编辑中宽度只增不减，避免退格删字时窗口左右跳、光标跟着抖
 
             Width = SnapUpToPixel(width, _dpiScaleX);
-            Height = SnapUpToPixel(content.Height + chromeH, _dpiScaleY);
+            // 编辑中窗口保持最大尺寸（进入编辑时已放大到 maxContentH + chromeH），内容超高由
+            // ScrollViewer 滚动；落定后（editingText == null）按内容缩回自适应高度
+            double height = SnapUpToPixel(content.Height + chromeH, _dpiScaleY);
+            if (editingText != null)
+                height = Math.Max(height, SnapUpToPixel(maxContentH + chromeH, _dpiScaleY));
+            Height = height;
 
             // 滚动条只在真的钳过高度时才出现，不交给 ScrollViewer 自己按浮点比较去猜；
             // Hidden 仍保留滚轮/键盘滚动能力。编辑态两层（外层 ScrollViewer 与 TextBox 自身）都要管。
             var bar = needsScroll ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden;
             _textScroll!.VerticalScrollBarVisibility = bar;
             _editBox!.VerticalScrollBarVisibility = bar;
+        }
+
+        /// <summary>
+        /// 取所在屏工作区并算出内容区尺寸上限（DIP，不含 chrome）。
+        /// 与 ApplyTextSize 既有口径一致：winPt 用窗口当前位置 × _dpiScale 取物理像素，
+        /// maxContentW = min(TextWidthDip, 工作区宽 DIP) − chrome，maxContentH = 工作区高 DIP × 60% − chrome，
+        /// 下限 Math.Max(x, 1)。编辑态放大（EnterEditMode）与自适应测量（ApplyTextSize）共用。
+        /// </summary>
+        private (double MaxContentW, double MaxContentH) GetMaxContentSize()
+        {
+            // 用窗口当前位置所在屏（贴图可能已被拖到其它屏），物理像素坐标
+            var winPt = new System.Drawing.Point((int)(Left * _dpiScaleX), (int)(Top * _dpiScaleY));
+            var wa = System.Windows.Forms.Screen.FromPoint(winPt).WorkingArea;
+
+            double chromeW = BorderDip + TextPaddingDip * 2; // 两侧描边 + 内边距，内容区之外的固定开销
+            double chromeH = chromeW;
+            double maxContentW = Math.Min(TextWidthDip, wa.Width / _dpiScaleX) - chromeW;  // 物理 → DIP 用除法
+            double maxContentH = wa.Height / _dpiScaleY * TextMaxHeightRatio - chromeH;
+            maxContentW = Math.Max(maxContentW, 1);
+            maxContentH = Math.Max(maxContentH, 1);
+            return (maxContentW, maxContentH);
+        }
+
+        /// <summary>
+        /// 把窗口位置钳进所在屏工作区（保证放大后的窗口完整可见）：物理右/下边缘超出工作区
+        /// 则回收到边缘内；窗口大于工作区时贴左上角。Left/Top 是 DIP，判定先换算物理像素。
+        /// </summary>
+        private void ClampIntoWorkingArea()
+        {
+            var winPt = new System.Drawing.Point((int)(Left * _dpiScaleX), (int)(Top * _dpiScaleY));
+            var wa = System.Windows.Forms.Screen.FromPoint(winPt).WorkingArea;
+
+            double physW = Width * _dpiScaleX;   // DIP → 物理用乘法
+            double physH = Height * _dpiScaleY;
+            double physL = Left * _dpiScaleX;
+            double physT = Top * _dpiScaleY;
+
+            // 窗口大于工作区时贴左上角；否则右/下边缘超出则回收（宽/高已由尺寸上限保证 ≤ 工作区）
+            double newPhysL = physW >= wa.Width ? wa.Left : Math.Clamp(physL, wa.Left, wa.Right - physW);
+            double newPhysT = physH >= wa.Height ? wa.Top : Math.Clamp(physT, wa.Top, wa.Bottom - physH);
+            Left = newPhysL / _dpiScaleX; // 物理 → DIP 用除法
+            Top = newPhysT / _dpiScaleY;
         }
 
         /// <summary>
@@ -785,6 +919,19 @@ namespace CommandLauncher
 
             Left = _dragStartLeft + dx / _dragScaleX; // 物理 → DIP 用除法
             Top = _dragStartTop + dy / _dragScaleY;
+
+            // 框选整体移动：拖动任一选中贴图时，其余选中成员同步移动。成员用「框选落定时」的快照
+            // （它们收不到本次 MouseDown），只设 Left/Top，不碰其拖动状态机（幽灵按下/双击判定不受影响）
+            if (_selected.Contains(this))
+            {
+                foreach (var other in _selected)
+                {
+                    if (ReferenceEquals(other, this) || other._isEditing)
+                        continue;
+                    other.Left = other._dragStartLeft + dx / other._dragScaleX;
+                    other.Top = other._dragStartTop + dy / other._dragScaleY;
+                }
+            }
         }
 
         // 真正的左键释放 —— 唯一可信的「用户松手」信号，无条件标记（不看 _dragPending）
@@ -808,18 +955,49 @@ namespace CommandLauncher
             if (IsMouseCaptured)
                 ReleaseMouseCapture();
 
+            RefreshDpiSnapshot();
+
+            // 整体移动结束：跨 DPI 屏拖动后刷新各成员 DPI 快照，并钳制完全出屏的成员（不钳制跟手拖动中的成员）
+            if (_selected.Contains(this))
+            {
+                foreach (var other in _selected)
+                {
+                    if (ReferenceEquals(other, this))
+                        continue;
+                    other.RefreshDpiSnapshot();
+                    other.ClampOutsideToNearestScreen();
+                }
+            }
+
+            PinStore.ScheduleSave(); // 拖动只在结束时存一次（拖动中不反复落盘）；排在成员钳制之后，钳制后的位置也一并落盘
+        }
+
+        // 刷新 DPI 缩放快照：贴图可能被拖到另一 DPI 的显示器上，
+        // 后续 ApplyTextSize / ClampOutsideToNearestScreen 的物理 ↔ DIP 换算要用新值
+        private void RefreshDpiSnapshot()
+        {
             var dpi = VisualTreeHelper.GetDpi(this);
             _dpiScaleX = dpi.DpiScaleX;
             _dpiScaleY = dpi.DpiScaleY;
-
-            PinStore.ScheduleSave(); // 拖动只在结束时存一次（拖动中不反复落盘）
         }
 
         private void OnKeyDown(object sender, KeyEventArgs e)
         {
             // 编辑态下 Esc 已被 TextBox 的 PreviewKeyDown 拦截（标 Handled 不会到达此处），此判断为防御
             if (e.Key == Key.Escape && !_isEditing)
-                Close();
+            {
+                // 有框选选中时 Esc 只取消选中不再关闭贴图（窗口级 KeyDown 只在活动窗口收按键，
+                // 非活动贴图按 Esc 落不到本进程，与既有「Esc 关闭」同一边界）
+                if (_selected.Count > 0)
+                {
+                    ClearSelection();
+                    Logger.LogInfo("已取消框选选中");
+                }
+                else
+                {
+                    Close();
+                }
+            }
             // F2 进入编辑（仅文本模式、非编辑态）。窗口级 KeyDown 只在窗口是活动窗口时收到按键，
             // 与「F2 只要在窗口是活动窗口时响应即可」的语义一致；非活动窗口的贴图按 F2 落不到本进程。
             else if (e.Key == Key.F2 && !_isEditing)
@@ -836,7 +1014,15 @@ namespace CommandLauncher
             if (_mode != ContentMode.Text || _isEditing)
                 return;
             _isEditing = true;
-            _editMinWidthDip = Width; // 编辑中宽度只增不减的下限
+
+            // 进入编辑即放大到最大尺寸（宽 = 内容上限 + chrome，高 = 高度上限 + chrome），方便编辑长文本；
+            // 位置同步钳制进工作区，保证放大后的窗口完整可见。退出编辑时 ApplyTextSize 按内容缩回。
+            var (maxContentW, maxContentH) = GetMaxContentSize();
+            Width = SnapUpToPixel(maxContentW + BorderDip + TextPaddingDip * 2, _dpiScaleX);
+            Height = SnapUpToPixel(maxContentH + BorderDip + TextPaddingDip * 2, _dpiScaleY);
+            ClampIntoWorkingArea();
+
+            _editMinWidthDip = Width; // 编辑中宽度只增不减的下限（取到的就是放大后的最大宽）
             _editBox!.Text = _text;
             _textScroll!.Content = _editBox;
             _border.BorderBrush = HoverBorderBrush;
@@ -884,7 +1070,12 @@ namespace CommandLauncher
             }
             ApplyTextSize();
             _textScroll!.Content = _textBlock;
-            _border.BorderBrush = CategoryBrush(_category);
+            // 描边按选中态恢复：被框选选中的便签落定后仍显示选中视觉（白描边 + 厚 2），
+            // 否则回常态（分类描边 + 厚 1）——直接设分类色会把选中视觉的厚度一并弄丢
+            if (_selected.Contains(this))
+                ApplySelectedVisual();
+            else
+                ApplyDefaultBorder();
             ContextMenu = BuildContextMenu();
         }
 

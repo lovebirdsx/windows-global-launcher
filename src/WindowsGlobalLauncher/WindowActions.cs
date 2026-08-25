@@ -34,6 +34,7 @@ namespace CommandLauncher
                 ["Screenshot"] = ScreenshotManager.StartCapture,
                 ["PinClipboard"] = ScreenshotManager.PinFromClipboard,
                 ["TogglePinVisibility"] = PinWindow.ToggleAllVisibility, // 切换所有贴图（图片贴图与文字便签）的显示/隐藏
+                ["PinBoxSelect"] = PinWindow.StartBoxSelect, // 框选多个贴图后整体移动（橡皮筋框选，Esc 取消选中）
             };
 
         /// <summary>

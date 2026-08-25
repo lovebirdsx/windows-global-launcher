@@ -50,6 +50,7 @@ namespace CommandLauncher
             new() { Action = "Screenshot", HotKey = "F4" },
             new() { Action = "PinClipboard", HotKey = "F7" },
             new() { Action = "TogglePinVisibility", HotKey = "Shift+F7" },
+            new() { Action = "PinBoxSelect", HotKey = "Ctrl+F7" },
         ];
         public static string ConfigPath
         {
@@ -178,6 +179,8 @@ namespace CommandLauncher
                         config.WindowActions.Add(new() { Action = "PinClipboard", HotKey = "F7" });
                     if (!config.WindowActions.Any(a => string.Equals(a.Action, "TogglePinVisibility", StringComparison.OrdinalIgnoreCase)))
                         config.WindowActions.Add(new() { Action = "TogglePinVisibility", HotKey = "Shift+F7" });
+                    if (!config.WindowActions.Any(a => string.Equals(a.Action, "PinBoxSelect", StringComparison.OrdinalIgnoreCase)))
+                        config.WindowActions.Add(new() { Action = "PinBoxSelect", HotKey = "Ctrl+F7" });
                     _config = config;
                     Logger.LogInfo($"成功加载配置文件，包含 {config.Commands.Count} 个命令");
                     
@@ -304,7 +307,7 @@ namespace CommandLauncher
   // 示例: ""Ctrl+Space"", ""Alt+R"", ""Win+L""
   ""HotKey"": """ + _config.HotKey + @""",
   // 窗口动作热键（全局生效）
-  // 可用 Action: ""CloseWindow""(关闭前台窗口，等同 Alt+F4) / ""VolumeUp""(增大音量) / ""VolumeDown""(减小音量) / ""ToggleMute""(切换静音) / ""ShowClipboardHistory""(剪贴板历史) / ""Screenshot""(区域截图) / ""PinClipboard""(把剪贴板图片钉为屏幕贴图) / ""TogglePinVisibility""(隐藏/显示所有贴图)
+  // 可用 Action: ""CloseWindow""(关闭前台窗口，等同 Alt+F4) / ""VolumeUp""(增大音量) / ""VolumeDown""(减小音量) / ""ToggleMute""(切换静音) / ""ShowClipboardHistory""(剪贴板历史) / ""Screenshot""(区域截图) / ""PinClipboard""(把剪贴板图片钉为屏幕贴图) / ""TogglePinVisibility""(隐藏/显示所有贴图) / ""PinBoxSelect""(框选贴图整体移动)
   ""WindowActions"": [";
 
                 for (int i = 0; i < _config.WindowActions.Count; i++)

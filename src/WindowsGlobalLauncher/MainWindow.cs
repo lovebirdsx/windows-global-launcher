@@ -475,6 +475,9 @@ namespace CommandLauncher
                 var togglePinsItem = new System.Windows.Forms.ToolStripMenuItem("隐藏所有贴图");
                 togglePinsItem.Click += (s, e) => PinWindow.ToggleAllVisibility();
                 contextMenu.Items.Add(togglePinsItem);
+                var boxSelectItem = new System.Windows.Forms.ToolStripMenuItem("框选移动贴图");
+                boxSelectItem.Click += (s, e) => PinWindow.StartBoxSelect();
+                contextMenu.Items.Add(boxSelectItem);
                 contextMenu.Items.Add(BuildEyeCareMenu());
                 var autoStartItem = new System.Windows.Forms.ToolStripMenuItem("开机自动启动") { CheckOnClick = false };
                 autoStartItem.Click += (s, e) => ToggleAutoStart();
@@ -491,6 +494,7 @@ namespace CommandLauncher
                 {
                     togglePinsItem.Text = PinWindow.IsAllHidden ? "显示所有贴图" : "隐藏所有贴图";
                     togglePinsItem.Enabled = PinWindow.OpenCount > 0;
+                    boxSelectItem.Enabled = PinWindow.OpenCount > 0;
 
                     // 计划任务可能被用户在「任务计划程序」里改掉，每次打开菜单实查一次（低频，可接受）
                     _autoStartEnabled = AutoStartManager.IsEnabled();
