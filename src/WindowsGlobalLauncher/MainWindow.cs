@@ -134,7 +134,10 @@ namespace CommandLauncher
     // 主窗口
     public class MainWindow : Window, IDisposable
     {
-        private static readonly string[] AppCommands = ["config", "setconfig", "logs", "update", "autostart", "exit"];
+        /// <summary>帮助文档（GitHub README）URL。</summary>
+        private const string HelpPageUrl = "https://github.com/lovebirdsx/windows-global-launcher";
+
+        private static readonly string[] AppCommands = ["config", "setconfig", "logs", "update", "autostart", "exit", "help"];
 
         private readonly ObservableCollection<Command> _filteredCommands = [];
         private readonly HotKeyListener _hotKeyListener = new();
@@ -485,6 +488,7 @@ namespace CommandLauncher
                 contextMenu.Items.Add("设定配置文件", null, (s, e) => AppConfig.SetConfigFile());
                 contextMenu.Items.Add("打开配置文件", null, (s, e) => AppConfig.OpenConfigFile());
                 contextMenu.Items.Add("打开日志文件", null, (s, e) => Logger.OpenLogFile());
+                contextMenu.Items.Add("打开帮助文档", null, (s, e) => OpenHelpDocument());
                 contextMenu.Items.Add("检查更新", null, (s, e) => _ = UpdateCoordinator.RunManualCheckAsync());
                 contextMenu.Items.Add("退出", null, (s, e) => ExitApplication());
                 _notifyIcon.ContextMenuStrip = contextMenu;
@@ -807,6 +811,15 @@ namespace CommandLauncher
                 ExecuteCount = AppState.Instance.GetCommandExecuteCount("exit")
             });
 
+            commands.Add(new Command
+            {
+                Name = "help",
+                Description = "打开帮助文档（GitHub README）",
+                Shell = "help",
+                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("help"),
+                ExecuteCount = AppState.Instance.GetCommandExecuteCount("help")
+            });
+
             // 注入护眼模式内置命令（护眼：xxx），由 ExecuteAppCommand 特殊处理
             foreach (var mode in EyeCareManager.Modes)
             {
@@ -1006,10 +1019,29 @@ namespace CommandLauncher
                 {
                     ExitApplication();
                 }
+                else if (selectedCommand.Name == "help")
+                {
+                    OpenHelpDocument();
+                }
                 return true;
             }
 
             return false;
+        }
+
+        private void OpenHelpDocument()
+        {
+            try
+            {
+                // 必须 UseShellExecute=true：.NET Core 下直接 Process.Start(url) 无法用默认浏览器打开
+                Process.Start(new ProcessStartInfo(HelpPageUrl) { UseShellExecute = true });
+                Logger.LogInfo("打开帮助文档");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("打开帮助文档失败", ex);
+                MessageBox.Show($"打开帮助文档失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
 
         /// <summary>
