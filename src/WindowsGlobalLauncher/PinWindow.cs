@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
@@ -441,7 +442,7 @@ namespace CommandLauncher
         /// <summary>
         /// 进入框选态（热键动作 PinBoxSelect / 托盘菜单入口）：弹出全屏橡皮筋遮罩，
         /// 松手后选中与框相交的可见贴图，之后拖动任一选中贴图即整体移动。
-        /// 无贴图 / 已在框选 / 截图会话进行中（两个全屏窗口叠加无意义）时忽略记日志。
+        /// 无贴图 / 全部贴图已整体隐藏 / 已在框选 / 截图会话进行中（两个全屏窗口叠加无意义）时忽略记日志。
         /// </summary>
         public static void StartBoxSelect()
         {
@@ -455,15 +456,31 @@ namespace CommandLauncher
                 Logger.LogInfo("当前无贴图，忽略框选移动（PinBoxSelect）");
                 return;
             }
+            if (_allHidden)
+            {
+                // 隐藏中的贴图不参与命中（EnumerateSelectablePins 按 IsVisible 过滤），
+                // 此时弹出遮罩必然选中 0 个，直接忽略并提示
+                Logger.LogInfo("全部贴图处于整体隐藏状态，忽略框选移动（PinBoxSelect）");
+                return;
+            }
             if (ScreenshotManager.IsCapturing)
             {
                 Logger.LogWarning("截图会话进行中，忽略框选移动（PinBoxSelect）");
                 return;
             }
             _boxSelecting = true;
-            var overlay = new PinSelectOverlayWindow();
-            overlay.Closed += (s, e) => _boxSelecting = false;
-            overlay.Show();
+            try
+            {
+                var overlay = new PinSelectOverlayWindow();
+                overlay.Closed += (s, e) => _boxSelecting = false;
+                overlay.Show();
+            }
+            catch (Exception ex)
+            {
+                // 遮罩构造/显示失败时复位标志，避免 _boxSelecting 卡死、后续框选全部被拒
+                _boxSelecting = false;
+                Logger.LogError("框选遮罩创建失败", ex);
+            }
         }
 
         /// <summary>应用框选结果：先清空旧选中，再收集与选择框（虚拟屏物理像素）相交的可见贴图。</summary>
@@ -558,7 +575,10 @@ namespace CommandLauncher
             // 构造需要物理像素坐标，先用 DIP 原值充当近似物理点（构造里的位置随后会被
             // ApplyRestoredState 按持久化 DIP 覆写），只为让构造走完初始化流程
             var approx = new System.Drawing.Point((int)entry.LeftDip, (int)entry.TopDip);
-            var w = entry.IsImage ? new PinWindow(image!, approx) : new PinWindow(entry.Text, approx, entry.Category);
+            // 手改 JSON 可能出现非法分类名：CategoryBrush 虽回退灰描边，但非法名会原样进入
+            // _category 并随持久化带回、右键分类子菜单也无勾选——恢复时直接回退默认分类
+            var category = NoteCategories.Any(c => c.Name == entry.Category) ? entry.Category : DefaultCategory;
+            var w = entry.IsImage ? new PinWindow(image!, approx) : new PinWindow(entry.Text, approx, category);
             w.ApplyRestoredState(entry);
             return w;
         }
@@ -577,7 +597,8 @@ namespace CommandLauncher
             Left = entry.LeftDip;
             Top = entry.TopDip;
             Opacity = Math.Clamp(entry.Opacity, MinOpacity, 1.0);
-            _initialPhysicalTopLeft = new System.Drawing.Point((int)(Left * _dpiScaleX), (int)(Top * _dpiScaleY));
+            _initialPhysicalTopLeft = new System.Drawing.Point(
+                (int)Math.Round(Left * _dpiScaleX), (int)Math.Round(Top * _dpiScaleY)); // 四舍五入比向零截断少亚像素漂移（仅 DPI 变化触发重算时用得到）
             if (_mode == ContentMode.Text)
                 ApplyTextSize();
             ClampOutsideToNearestScreen();
@@ -880,6 +901,23 @@ namespace CommandLauncher
             _dragStartCursor = cur;
             _dragStartLeft = Left;
             _dragStartTop = Top;
+
+            // 框选整体移动：拖动任一选中贴图前，把全体选中成员的快照刷新为「此刻」的位置/DPI。
+            // 快照若只在框选落定时拍一次，第二次拖动会用旧值平移成员、整体队形错乱（成员
+            // 收不到本次 MouseDown，必须由按下贴图代为刷新——广播公式见 OnMouseMoveDrag）
+            if (_selected.Contains(this))
+            {
+                foreach (var other in _selected)
+                {
+                    if (ReferenceEquals(other, this))
+                        continue;
+                    other._dragStartLeft = other.Left;
+                    other._dragStartTop = other.Top;
+                    other._dragScaleX = other._dpiScaleX;
+                    other._dragScaleY = other._dpiScaleY;
+                }
+            }
+
             _dragPending = true; // 见 ③：此处刻意不 CaptureMouse
             _dragging = false;
         }

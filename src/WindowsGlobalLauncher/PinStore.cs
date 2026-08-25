@@ -205,23 +205,28 @@ namespace CommandLauncher
 
         /// <summary>
         /// 图片条目 PNG 缺失才写盘（已存在则跳过——同一贴图内容不变，Id 不变就不必重编码）。
-        /// 恢复期间 Load 会先按此文件名校验存在性，写坏/写一半的文件会在恢复时经 DecodeImage 兜底丢弃。
+        /// 先写临时文件再同卷 rename（与 UpdateInstaller 的 .new 模式同理）：编码中途被强杀
+        /// 只留下可清理的 .tmp，不会在原路径留下半个 PNG（半个 PNG 会让恢复时该贴图永久丢失）。
         /// </summary>
         public static void EnsureImagePng(string id, BitmapSource image, string? dir = null)
         {
+            var path = ImagePath(id, dir);
             try
             {
-                var path = ImagePath(id, dir);
                 if (File.Exists(path))
                     return;
                 Directory.CreateDirectory(PinsDir(dir));
                 var encoder = new PngBitmapEncoder();
                 encoder.Frames.Add(BitmapFrame.Create(image));
-                using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
-                encoder.Save(fs);
+                var tmp = path + ".tmp";
+                using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write))
+                    encoder.Save(fs);
+                File.Move(tmp, path);
             }
             catch (Exception ex)
             {
+                // 失败时尽力清掉可能写了一半的临时文件（存在即删，不存在忽略）
+                try { File.Delete(path + ".tmp"); } catch { }
                 Logger.LogError($"写入贴图图片 {id} 失败", ex);
             }
         }
@@ -303,23 +308,31 @@ namespace CommandLauncher
                 int restored = 0;
                 foreach (var entry in entries)
                 {
-                    if (entry.IsImage)
+                    // 逐条防护：单条数据异常（手改 JSON 出 NaN/Infinity 等）只丢该条，不阻断其余恢复
+                    try
                     {
-                        var image = DecodeImage(entry.Id);
-                        if (image == null)
+                        if (entry.IsImage)
                         {
-                            Logger.LogWarning($"贴图图片不可用时丢弃该条目: {entry.Id}");
-                            continue;
+                            var image = DecodeImage(entry.Id);
+                            if (image == null)
+                            {
+                                Logger.LogWarning($"贴图图片不可用时丢弃该条目: {entry.Id}");
+                                continue;
+                            }
+                            PinWindow.RestoreFromEntry(entry, image);
                         }
-                        PinWindow.RestoreFromEntry(entry, image);
+                        else
+                        {
+                            if (string.IsNullOrWhiteSpace(entry.Text) || entry.Text.Length > MaxPinTextLength)
+                                continue;
+                            PinWindow.RestoreFromEntry(entry, null);
+                        }
+                        restored++;
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        if (string.IsNullOrWhiteSpace(entry.Text) || entry.Text.Length > MaxPinTextLength)
-                            continue;
-                        PinWindow.RestoreFromEntry(entry, null);
+                        Logger.LogWarning($"恢复贴图 {entry.Id} 失败，跳过该条目: {ex.Message}");
                     }
-                    restored++;
                 }
                 if (restored > 0)
                     Logger.LogInfo($"已恢复 {restored} 个贴图");
