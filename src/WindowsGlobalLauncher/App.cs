@@ -55,6 +55,9 @@ namespace CommandLauncher
             // 恢复上次保存的护眼模式（内部会先还原单位矩阵，清理异常退出的颜色残留）
             EyeCareManager.RestoreLastMode();
 
+            // 恢复上次退出时仍打开的贴图（图片贴图与文字便签；整体隐藏状态不记忆，恢复后直接显示）
+            PinStore.RestorePins();
+
             // 清理历史遗留的孤儿 OCR 引擎进程（主程序曾被强杀/崩溃退出时，常驻子进程不会随之退出）
             _ = Task.Run(RapidOcrBackend.KillOrphanedEngines);
 
@@ -100,6 +103,10 @@ namespace CommandLauncher
         {
             // 还原全屏颜色矩阵，避免护眼效果在进程退出后残留
             EyeCareManager.ResetEffect();
+
+            // 贴图状态退出兜底保存：防抖 timer 可能尚未到期，这里停掉并立即落盘
+            // （强杀/崩溃时 OnExit 不执行，靠各交互点的防抖保存兜底，见 PinStore）
+            PinStore.Flush();
 
             // 关闭增强 OCR 常驻子进程（幂等；失败不能影响其它退出清理）
             try

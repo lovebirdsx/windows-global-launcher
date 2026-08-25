@@ -185,6 +185,9 @@ namespace CommandLauncher
             }
         }
 
+        // 贴图唯一标识（Guid N 格式，构造生成；持久化时同时作为图片贴图的 PNG 文件名，见 PinStore）
+        private readonly string _id = Guid.NewGuid().ToString("N");
+
         private readonly ContentMode _mode;
         private string _category = DefaultCategory; // 便签分类名（仅文本模式使用；图片模式不赋值、永不使用）
         private readonly BitmapSource? _source = null;   // 图片模式非空
@@ -219,7 +222,9 @@ namespace CommandLauncher
         private System.Drawing.Point _lastPressCursor;   // 上一次按下时的光标（物理像素）
         private bool _sawReleaseSincePress = true;       // 上次按下之后是否见过释放（初始 true，首击不受影响）
 
-        private readonly System.Drawing.Point _initialPhysicalTopLeft; // 初始位置（物理像素），Loaded 校正 DPI 时用
+        // 初始位置（物理像素），Loaded 校正 DPI 时用。非 readonly：恢复持久化状态时需要回写它，
+        // 否则 OnLoadedRecheckDpi 会按旧值把恢复位置弹回去（见 ApplyRestoredState）
+        private System.Drawing.Point _initialPhysicalTopLeft;
         private double _dpiScaleX = 1.0;
         private double _dpiScaleY = 1.0;
         private double _baseWidthDip;  // 基准 DIP 窗口尺寸（zoom=1 时，含描边），仅图片模式使用
@@ -424,6 +429,68 @@ namespace CommandLauncher
                 HideAll();
         }
 
+        // ---- 持久化/框选取数用的只读视图（internal，供 PinStore 与后续框选功能共用；仅 UI 线程访问）----
+
+        /// <summary>是否图片贴图（false = 文字便签）。</summary>
+        internal bool IsImagePin => _mode == ContentMode.Image;
+
+        /// <summary>仅文字便签：当前文本内容（编辑落定时更新）。</summary>
+        internal string PinText => _text;
+
+        /// <summary>仅文字便签：分类名（8 个预设之一）。</summary>
+        internal string PinCategory => _category;
+
+        /// <summary>仅图片贴图：当前缩放比例。</summary>
+        internal double PinZoom => _zoom;
+
+        /// <summary>仅图片贴图：图片源（持久化 PNG 编码用）。</summary>
+        internal BitmapSource? PinImageSource => _source;
+
+        /// <summary>贴图唯一标识（构造生成，同 PinStore.PinEntry.Id）。</summary>
+        internal string PinId => _id;
+
+        /// <summary>窗口当前矩形（虚拟屏物理像素）：DIP × 当前 DPI 快照换算。</summary>
+        internal System.Drawing.RectangleF PhysicalBounds => new(
+            (float)(Left * _dpiScaleX), (float)(Top * _dpiScaleY),
+            (float)(Width * _dpiScaleX), (float)(Height * _dpiScaleY));
+
+        /// <summary>当前全部已打开贴图（仅 UI 线程访问；供 PinStore 枚举保存）。</summary>
+        internal static IReadOnlyList<PinWindow> OpenPins => _open;
+
+        /// <summary>
+        /// 按持久化条目重建贴图并直接显示（PinStore.RestorePins 调用，仅 UI 线程）。
+        /// 文字便签刻意走私营构造而非 FromText——不污染会话「上次分类」记忆。
+        /// </summary>
+        internal static PinWindow RestoreFromEntry(PinStore.PinEntry entry, BitmapSource? image)
+        {
+            // 构造需要物理像素坐标，先用 DIP 原值充当近似物理点（构造里的位置随后会被
+            // ApplyRestoredState 按持久化 DIP 覆写），只为让构造走完初始化流程
+            var approx = new System.Drawing.Point((int)entry.LeftDip, (int)entry.TopDip);
+            var w = entry.IsImage ? new PinWindow(image!, approx) : new PinWindow(entry.Text, approx, entry.Category);
+            w.ApplyRestoredState(entry);
+            return w;
+        }
+
+        // 把持久化的位置/缩放/透明度覆写到构造出的新实例上：
+        // 关键是回写 _initialPhysicalTopLeft——它是 Loaded 后 DPI 校正重算位置的依据，
+        // 不回写的话恢复位置会在 OnLoadedRecheckDpi 里被弹回构造时的近似点
+        private void ApplyRestoredState(PinStore.PinEntry entry)
+        {
+            if (_mode == ContentMode.Image)
+            {
+                _zoom = Math.Clamp(entry.Zoom, MinZoom, MaxZoom);
+                Width = _baseWidthDip * _zoom;
+                Height = _baseHeightDip * _zoom;
+            }
+            Left = entry.LeftDip;
+            Top = entry.TopDip;
+            Opacity = Math.Clamp(entry.Opacity, MinOpacity, 1.0);
+            _initialPhysicalTopLeft = new System.Drawing.Point((int)(Left * _dpiScaleX), (int)(Top * _dpiScaleY));
+            if (_mode == ContentMode.Text)
+                ApplyTextSize();
+            ClampOutsideToNearestScreen();
+        }
+
         private static Brush Freeze(Brush brush)
         {
             brush.Freeze();
@@ -479,8 +546,10 @@ namespace CommandLauncher
                 if (_open.Count == 0)
                     _allHidden = false; // 贴图全部关闭后整体隐藏状态自然结束
                 Logger.LogInfo($"贴图已关闭：{contentDesc}，剩余 {_open.Count} 个");
+                PinStore.ScheduleSave(); // 关闭后集合已不含它，保存最新列表
             };
             Logger.LogInfo($"贴图已创建：{contentDesc}，初始位置 ({_initialPhysicalTopLeft.X}, {_initialPhysicalTopLeft.Y})（物理像素），当前共 {_open.Count} 个");
+            PinStore.ScheduleSave(); // 新建即保存（恢复重启前关闭的贴图丢失的防御）
         }
 
         // 初始显示：整体隐藏状态下新钉贴图时，先恢复全部隐藏贴图——本窗此刻已在 _open，
@@ -742,6 +811,8 @@ namespace CommandLauncher
             var dpi = VisualTreeHelper.GetDpi(this);
             _dpiScaleX = dpi.DpiScaleX;
             _dpiScaleY = dpi.DpiScaleY;
+
+            PinStore.ScheduleSave(); // 拖动只在结束时存一次（拖动中不反复落盘）
         }
 
         private void OnKeyDown(object sender, KeyEventArgs e)
@@ -809,6 +880,7 @@ namespace CommandLauncher
                 _text = _editBox!.Text;
                 _textBlock!.Text = _text;
                 Logger.LogInfo($"文本贴图编辑已保存：{_text.Length} 字符");
+                PinStore.ScheduleSave(); // 文本内容变化，保存最新文本
             }
             ApplyTextSize();
             _textScroll!.Content = _textBlock;
@@ -857,6 +929,7 @@ namespace CommandLauncher
             {
                 Opacity = Math.Clamp(Opacity + (e.Delta > 0 ? OpacityStep : -OpacityStep), MinOpacity, 1.0);
                 ShowBadge($"{Percent(Opacity)}%");
+                PinStore.ScheduleSave(); // 透明度经防抖合并（连续滚轮只落盘一次）
                 e.Handled = true;
                 return;
             }
@@ -891,6 +964,7 @@ namespace CommandLauncher
             Width = newW;
             Height = newH;
             ShowBadge($"{Percent(_zoom)}%");
+            PinStore.ScheduleSave(); // 缩放经防抖合并（连续滚轮只落盘一次）
         }
 
         // 「缩放 100%」：恢复 zoom=1 与基准尺寸（位置不动），仅图片模式
@@ -964,6 +1038,7 @@ namespace CommandLauncher
             _category = name;
             _lastCategory = name; // 同步会话记忆，F7 连续钉同类便签免重选
             _border.BorderBrush = CategoryBrush(name);
+            PinStore.ScheduleSave(); // 分类变化，保存最新分类
             Logger.LogInfo($"文本贴图分类已设为：{name}");
         }
 
