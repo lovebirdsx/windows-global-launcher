@@ -69,7 +69,8 @@ namespace CommandLauncher
         // 仍用窗口矩形。必须用内容矩形的地方（漏掉任何一处都会错位）：
         //   ① PhysicalBounds —— 框选命中测试，否则会命中看不见的透明边距；
         //   ② 持久化 LeftDip/TopDip（ContentLeft/ContentTop）—— 存内容左上角，改本常量不偏移；
-        //   ③ ClampOutsideToNearestScreen / ClampIntoWorkingArea 的可见性判定与钳制；
+        //   ③ ClampOutsideToNearestScreen 的可见性判定与钳制、GetMaxContentSize(anchored) 的
+        //      「到工作区右/下边缘」尺寸上限（编辑态放大锚定左上角）；
         //   ④ _initialPhysicalTopLeft —— 内容左上角物理像素，Loaded DPI 校正重算 Left/Top 的依据。
         // 反向换算：内容左上角 = 窗口 Left/Top + ShadowMarginDip，窗口宽高 = 内容宽高 + 2 × 本值。
         private const double ShadowMarginDip = 16.0;
@@ -787,7 +788,11 @@ namespace CommandLauncher
         /// <param name="editingText">编辑态传 TextBox 的当前文本；null 表示按已落定的 _text 测量</param>
         private void ApplyTextSize(string? editingText = null)
         {
-            var (maxContentW, maxContentH) = GetMaxContentSize();
+            // 编辑态（editingText != null）用锚定上限：上限 = 到工作区右/下边缘的剩余空间。这一处
+            // 必须跟 EnterEditMode 用同一口径——编辑中每敲一字都会走到这里（OnEditBoxTextChanged），
+            // 若这里仍按整块工作区算，会把刚锚定好的窗口重新撑回溢出尺寸（尤其下面那行高度下限）。
+            // 非编辑态（落定/取消/新钉/恢复）仍用整块工作区上限，见 GetMaxContentSize 注释。
+            var (maxContentW, maxContentH) = GetMaxContentSize(anchored: editingText != null);
 
             double chromeW = BorderDip + TextPaddingDip * 2; // 两侧描边 + 内边距，内容区之外的固定开销
             double chromeH = chromeW;
@@ -838,11 +843,27 @@ namespace CommandLauncher
         /// 与 ApplyTextSize 既有口径一致：winPt 用内容左上角当前位置 × _dpiScale 取物理像素
         /// （贴图可能已被拖到其它屏），maxContentW = min(TextWidthDip, 工作区宽 DIP − 两侧阴影边距)
         /// − chrome，maxContentH = 工作区高 DIP × 60% − 两侧阴影边距 − chrome，
-        /// 下限 Math.Max(x, 1)。边距必须计入：窗口比内容大 2 × ShadowMarginDip，
+        /// 下限 Math.Max(x, 1)（锚定分支的下限另见下段，是更严的 Min* 地板）。边距必须计入：窗口比
+        /// 内容大 2 × ShadowMarginDip，
         /// 不扣的话编辑态放大后的窗口会超出工作区。编辑态放大（EnterEditMode）与自适应测量
         /// （ApplyTextSize）共用。
+        /// <para>
+        /// anchored=true（编辑态放大）时上限进一步收窄为「内容左上角到工作区右/下边缘的剩余空间」
+        /// 并落到 MinTextWidthDip/MinTextHeightDip 地板（几何抽到
+        /// <see cref="ScreenshotGeometry.AnchorPinMaxContentSize"/> 便于单测）——编辑态锚定左上角
+        /// 不动，装不下就以到边尺寸为准、内容超出交给 ScrollViewer 滚动。
+        /// </para>
+        /// <para>
+        /// 锚定语义**只给编辑态**，非编辑态（新钉/持久化恢复/编辑落定后缩回）刻意保持原样：新便签
+        /// 的初始位置就是鼠标光标处（ScreenshotManager.PinFromClipboard），用户常钉在屏幕右/下缘，
+        /// 若非编辑态也按到边限尺寸，刚钉出来的便签会被压到最小尺寸地板，重启恢复贴边便签同样会
+        /// 变小——都是用户可见回归。非编辑态本就允许内容右/下边缘溢出工作区（480 宽便签钉在右缘
+        /// 即溢出，ClampOutsideToNearestScreen 只兜「完全出屏」），不是本次要改的不变式。
+        /// </para>
         /// </summary>
-        private (double MaxContentW, double MaxContentH) GetMaxContentSize()
+        /// <param name="anchored">true = 编辑态放大，上限收窄为到工作区右/下边缘的剩余空间。
+        /// 刻意不给默认值：两态语义差别正是本方法的要点，新调用点必须显式表态选哪一种</param>
+        private (double MaxContentW, double MaxContentH) GetMaxContentSize(bool anchored)
         {
             // 用内容左上角当前位置所在屏（贴图可能已被拖到其它屏），物理像素坐标
             var winPt = new System.Drawing.Point((int)((Left + ShadowMarginDip) * _dpiScaleX), (int)((Top + ShadowMarginDip) * _dpiScaleY));
@@ -852,31 +873,22 @@ namespace CommandLauncher
             double chromeH = chromeW;
             double maxContentW = Math.Min(TextWidthDip, wa.Width / _dpiScaleX - ShadowMarginDip * 2) - chromeW;  // 物理 → DIP 用除法
             double maxContentH = wa.Height / _dpiScaleY * TextMaxHeightRatio - ShadowMarginDip * 2 - chromeH;
+            // 地板放在分叉之前、两个分支共用：锚定分支只对「到边剩余空间」取 Min* 地板，基础上限本身
+            // 若为负（工作区比 chrome + 两侧边距还小，现实中不会发生）会被原样返回成负宽高
             maxContentW = Math.Max(maxContentW, 1);
             maxContentH = Math.Max(maxContentH, 1);
+
+            // 锚定分支自带 Min* 地板（比 1 更严），返回值无需再兜底
+            if (anchored)
+                return ScreenshotGeometry.AnchorPinMaxContentSize(
+                    (Left + ShadowMarginDip) * _dpiScaleX, (Top + ShadowMarginDip) * _dpiScaleY,
+                    _dpiScaleX, _dpiScaleY,
+                    wa.Right, wa.Bottom,
+                    maxContentW, maxContentH,
+                    chromeW, chromeH,
+                    MinTextWidthDip, MinTextHeightDip);
+
             return (maxContentW, maxContentH);
-        }
-
-        /// <summary>
-        /// 把内容矩形钳进所在屏工作区（保证放大后的窗口内容完整可见）：物理右/下边缘超出工作区
-        /// 则回收到边缘内；内容大于工作区时贴左上角。判定对象是内容矩形（窗口四周的透明阴影
-        /// 边距不算可见内容，见常量注释 ③）；Left/Top 是 DIP，判定先换算物理像素。
-        /// </summary>
-        private void ClampIntoWorkingArea()
-        {
-            var winPt = new System.Drawing.Point((int)((Left + ShadowMarginDip) * _dpiScaleX), (int)((Top + ShadowMarginDip) * _dpiScaleY));
-            var wa = System.Windows.Forms.Screen.FromPoint(winPt).WorkingArea;
-
-            double physW = (Width - ShadowMarginDip * 2) * _dpiScaleX;   // DIP → 物理用乘法（内容宽）
-            double physH = (Height - ShadowMarginDip * 2) * _dpiScaleY;
-            double physL = (Left + ShadowMarginDip) * _dpiScaleX;
-            double physT = (Top + ShadowMarginDip) * _dpiScaleY;
-
-            // 内容大于工作区时贴左上角；否则右/下边缘超出则回收（宽/高已由尺寸上限保证 ≤ 工作区）
-            double newPhysL = physW >= wa.Width ? wa.Left : Math.Clamp(physL, wa.Left, wa.Right - physW);
-            double newPhysT = physH >= wa.Height ? wa.Top : Math.Clamp(physT, wa.Top, wa.Bottom - physH);
-            Left = newPhysL / _dpiScaleX - ShadowMarginDip; // 物理 → DIP 用除法；内容位置 − 边距 = 窗口位置
-            Top = newPhysT / _dpiScaleY - ShadowMarginDip;
         }
 
         /// <summary>
@@ -1109,13 +1121,15 @@ namespace CommandLauncher
                 return;
             _isEditing = true;
 
-            // 进入编辑即放大到最大尺寸（宽 = 内容上限 + chrome，高 = 高度上限 + chrome，外加两侧
-            // 阴影边距——GetMaxContentSize 已把边距从工作区上限里扣掉，这里加回才是完整窗口尺寸）；
-            // 位置同步钳制进工作区，保证放大后的窗口完整可见。退出编辑时 ApplyTextSize 按内容缩回。
-            var (maxContentW, maxContentH) = GetMaxContentSize();
+            // 进入编辑即放大，但**左上角固定不动**：上限 = min(内容上限, 内容左上角到工作区右/下
+            // 边缘的剩余空间)（GetMaxContentSize(anchored) 已把边距从上限里扣掉，这里加回才是完整
+            // 窗口尺寸）。刻意不再把窗口钳回工作区——钳制会写回 Left/Top，靠近屏幕右/下缘的便签
+            // 一进编辑就被挪走，用户看到的是「位置变了」而不是「变大了」。剩余空间装不下时窗口就
+            // 停在到边尺寸（下限是 MinTextWidthDip/MinTextHeightDip），内容超出由 ScrollViewer 滚动。
+            // 退出编辑时 ApplyTextSize 按内容缩回，位置全程不动。
+            var (maxContentW, maxContentH) = GetMaxContentSize(anchored: true);
             Width = SnapUpToPixel(maxContentW + BorderDip + TextPaddingDip * 2 + ShadowMarginDip * 2, _dpiScaleX);
             Height = SnapUpToPixel(maxContentH + BorderDip + TextPaddingDip * 2 + ShadowMarginDip * 2, _dpiScaleY);
-            ClampIntoWorkingArea();
 
             _editMinWidthDip = Width; // 编辑中宽度只增不减的下限（取到的就是放大后的最大宽，含阴影边距，与 ApplyTextSize 的 width 同量纲）
             _editBox!.Text = _text;

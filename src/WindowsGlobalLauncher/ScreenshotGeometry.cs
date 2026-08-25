@@ -180,5 +180,50 @@ namespace CommandLauncher
 
             return new Size(w, h);
         }
+
+        /// <summary>
+        /// 文字便签贴图「编辑态放大时左上角固定不动」的内容区尺寸上限（DIP，不含 chrome，也不含阴影边距）。
+        /// 调用方 PinWindow.GetMaxContentSize(anchored: true) 先按整块工作区算出基础上限 baseMaxContentW/H，
+        /// 本函数再把上限收窄为「内容左上角到工作区右/下边缘的剩余空间」，落到 minContentW/H 地板。
+        /// 约束对象是内容矩形右/下边缘 ≤ 工作区右/下边缘（窗口四周的透明阴影边距允许溢出，
+        /// 与项目「凡涉及内容在屏幕上的可见位置/大小一律用内容矩形」的既有口径一致）。
+        ///
+        /// 三条取舍（为什么）：
+        /// 1. 地板取 minContentW/H 而非 1：FitTextPinContent 的 loW/loH = min(min, max) 语义在「上限小于下限」
+        ///    时以上限为准，若这里只落到 1，贴近右/下边缘的便签会被压成 1 DIP（甚至负值）而不是保持最小可读尺寸。
+        ///    地板必须在传入 FitTextPinContent 之前就做好。
+        /// 2. 用 min(baseMax, max(avail, min)) 而非 max(min(baseMax, avail), min)：后者在「工作区本身比最小尺寸还窄」
+        ///    时会把结果顶到 min、反而越出工作区；前者始终尊重 baseMax（工作区物理上限），与 FitTextPinContent 的
+        ///    「上限为准」口径一致。
+        /// 3. 地板生效时（剩余空间 < 最小尺寸，含 avail 为负——便签被拖到工作区边缘外、Screen.FromPoint 取到最近屏）
+        ///    窗口右/下边缘会越出工作区一点：刻意取舍，宁可溢出也不缩到不可读。
+        /// </summary>
+        /// <param name="contentLeftPhys">内容左上角 X，虚拟屏物理像素</param>
+        /// <param name="contentTopPhys">内容左上角 Y，虚拟屏物理像素</param>
+        /// <param name="dpiScaleX">水平 DPI 缩放（物理 → DIP 用除法）</param>
+        /// <param name="dpiScaleY">垂直 DPI 缩放（物理 → DIP 用除法）</param>
+        /// <param name="workAreaRightPhys">所在屏工作区右边缘，虚拟屏物理像素</param>
+        /// <param name="workAreaBottomPhys">所在屏工作区下边缘，虚拟屏物理像素</param>
+        /// <param name="baseMaxContentW">按整块工作区算出的内容宽度基础上限（DIP）</param>
+        /// <param name="baseMaxContentH">按整块工作区算出的内容高度基础上限（DIP）</param>
+        /// <param name="chromeW">内容区之外的水平固定开销（描边 + 内边距等，DIP）</param>
+        /// <param name="chromeH">内容区之外的垂直固定开销（描边 + 内边距等，DIP）</param>
+        /// <param name="minContentW">内容宽度地板（最小可读宽度，DIP）</param>
+        /// <param name="minContentH">内容高度地板（最小可读高度，DIP）</param>
+        public static (double MaxContentW, double MaxContentH) AnchorPinMaxContentSize(
+            double contentLeftPhys, double contentTopPhys,
+            double dpiScaleX, double dpiScaleY,
+            double workAreaRightPhys, double workAreaBottomPhys,
+            double baseMaxContentW, double baseMaxContentH,
+            double chromeW, double chromeH,
+            double minContentW, double minContentH)
+        {
+            // 物理 → DIP 用除法；chrome 是内容区之外的固定开销，剩余空间要先扣掉才装得下完整内容
+            double availW = (workAreaRightPhys - contentLeftPhys) / dpiScaleX - chromeW;
+            double availH = (workAreaBottomPhys - contentTopPhys) / dpiScaleY - chromeH;
+            double w = Math.Min(baseMaxContentW, Math.Max(availW, minContentW));
+            double h = Math.Min(baseMaxContentH, Math.Max(availH, minContentH));
+            return (w, h);
+        }
     }
 }

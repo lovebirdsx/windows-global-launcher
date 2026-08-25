@@ -216,5 +216,61 @@ namespace WindowsGlobalLauncher.Tests
             Assert.Equal(new Size(60, 15), result);
             Assert.False(needsScroll);
         }
+
+        // 编辑态放大时左上角固定不动的内容区尺寸上限。统一参数：dpiScale=1、工作区右/下边缘 (1000,800)、
+        // baseMax=(460,400)、chrome=(22,22)、min=(120,20)。
+        [Theory]
+        [InlineData(100, 100, 460, 400)]   // 常规：到边剩余充足，取基础上限
+        [InlineData(700, 100, 278, 400)]   // 贴右缘：宽收窄到 (1000−700)−22=278，高不受影响
+        [InlineData(100, 600, 460, 178)]   // 贴下缘：高收窄到 (800−600)−22=178，宽不受影响
+        [InlineData(860, 100, 120, 400)]   // 剩余 (1000−860)−22=118 < minW=120：宽落到地板 120
+        [InlineData(1100, 900, 120, 20)]   // 内容左上角已越出工作区、avail 为负：两轴均落到地板
+        [InlineData(700, 790, 278, 20)]    // 右下角：宽收窄 278 + 高剩余 (800−790)−22=−12 落地板，两轴各走一条分支
+        [InlineData(518, 378, 460, 400)]   // 剩余恰好等于基础上限：闭区间，不该被误收窄
+        [InlineData(858, 758, 120, 20)]    // 剩余恰好等于地板：闭区间，不该被误抬到地板之上
+        public void AnchorPinMaxContentSize_NarrowsMaxToRemainingSpace(
+            double contentLeft, double contentTop, double expectedW, double expectedH)
+        {
+            var result = ScreenshotGeometry.AnchorPinMaxContentSize(
+                contentLeft, contentTop,
+                dpiScaleX: 1.0, dpiScaleY: 1.0,
+                workAreaRightPhys: 1000, workAreaBottomPhys: 800,
+                baseMaxContentW: 460, baseMaxContentH: 400,
+                chromeW: 22, chromeH: 22,
+                minContentW: 120, minContentH: 20);
+
+            Assert.Equal((expectedW, expectedH), result);
+        }
+
+        [Fact]
+        public void AnchorPinMaxContentSize_WithDpiScale_ConvertsPhysToDipByDivision()
+        {
+            // 物理 → DIP 用除法：scale=2 时剩余空间减半再扣 chrome
+            var result = ScreenshotGeometry.AnchorPinMaxContentSize(
+                contentLeftPhys: 100, contentTopPhys: 100,
+                dpiScaleX: 2.0, dpiScaleY: 2.0,
+                workAreaRightPhys: 1000, workAreaBottomPhys: 800,
+                baseMaxContentW: 460, baseMaxContentH: 400,
+                chromeW: 22, chromeH: 22,
+                minContentW: 120, minContentH: 20);
+
+            Assert.Equal((428.0, 328.0), result); // (1000−100)/2−22=428、(800−100)/2−22=328
+        }
+
+        [Fact]
+        public void AnchorPinMaxContentSize_MaxSmallerThanMin_ResultStaysWithinMax()
+        {
+            // 极窄工作区：baseMax 小于 min 时尊重 baseMax 不反而放大到 min，
+            // 与 FitTextPinContent_MaxSmallerThanMin_ResultStaysWithinMax 同口径
+            var result = ScreenshotGeometry.AnchorPinMaxContentSize(
+                contentLeftPhys: 100, contentTopPhys: 100,
+                dpiScaleX: 1.0, dpiScaleY: 1.0,
+                workAreaRightPhys: 1000, workAreaBottomPhys: 800,
+                baseMaxContentW: 60, baseMaxContentH: 15,
+                chromeW: 22, chromeH: 22,
+                minContentW: 120, minContentH: 20);
+
+            Assert.Equal((60.0, 15.0), result);
+        }
     }
 }
