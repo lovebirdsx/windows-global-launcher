@@ -8,6 +8,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
@@ -37,9 +38,27 @@ namespace CommandLauncher
         // _open 清空时在 Closed 处理器中复位，维持不变式「_allHidden == true ⇒ _open 非空且全部隐藏」
         private static bool _allHidden;
 
-        // 描边画刷：常态白色半透明，鼠标悬停变蓝（冻结以便跨实例复用）
+        // 描边画刷：常态白色半透明（冻结以便跨实例复用）。悬停表达改用阴影浮起（PinHoverShadow），
+        // 不再变蓝描边——蓝色描边与「蓝」便签分类描边同色、无法区分；HoverBorderBrush 保留给编辑态提示用
         private static readonly Brush NormalBorderBrush = Freeze(new SolidColorBrush(Color.FromArgb(90, 255, 255, 255)));
         private static readonly Brush HoverBorderBrush = Freeze(new SolidColorBrush(Color.FromRgb(0, 120, 212)));
+
+        // 悬停阴影（冻结以便跨实例复用）：阴影垂在元素正下方，「浮起」层次感，不动描边颜色
+        private static readonly DropShadowEffect PinHoverShadow = CreateHoverShadow();
+
+        private static DropShadowEffect CreateHoverShadow()
+        {
+            var s = new DropShadowEffect
+            {
+                BlurRadius = 12,
+                Direction = 270,
+                ShadowDepth = 3,
+                Opacity = 0.5,
+                Color = Colors.Black,
+            };
+            s.Freeze();
+            return s;
+        }
 
         // 便签分类：8 个固定预设，仅描边颜色区分（分类名即颜色名，不可自定义）。
         // 灰为默认分类；画刷冻结后跨实例复用（同 NormalBorderBrush/HoverBorderBrush 先例）
@@ -242,8 +261,8 @@ namespace CommandLauncher
                 Cursor = Cursors.SizeAll, // 悬停提示可拖动
                 Child = _image,
             };
-            _border.MouseEnter += (s, e) => _border.BorderBrush = HoverBorderBrush;
-            _border.MouseLeave += (s, e) => _border.BorderBrush = NormalBorderBrush;
+            _border.MouseEnter += (s, e) => _border.Effect = PinHoverShadow;
+            _border.MouseLeave += (s, e) => _border.Effect = null;
             var root = new Grid();
             root.Children.Add(_border);
             root.Children.Add(_hint);
@@ -329,8 +348,8 @@ namespace CommandLauncher
                 Cursor = Cursors.SizeAll, // 悬停提示可拖动
                 Child = _textScroll,
             };
-            _border.MouseEnter += (s, e) => _border.BorderBrush = HoverBorderBrush;
-            _border.MouseLeave += (s, e) => _border.BorderBrush = CategoryBrush(_category);
+            _border.MouseEnter += (s, e) => _border.Effect = PinHoverShadow;
+            _border.MouseLeave += (s, e) => _border.Effect = null; // 描边保持分类色，悬停只加阴影（蓝描边与「蓝」分类重复，已弃用）
             var root = new Grid();
             root.Children.Add(_border);
             root.Children.Add(_hint);
