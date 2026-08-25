@@ -41,6 +41,33 @@ namespace CommandLauncher
         private static readonly Brush NormalBorderBrush = Freeze(new SolidColorBrush(Color.FromArgb(90, 255, 255, 255)));
         private static readonly Brush HoverBorderBrush = Freeze(new SolidColorBrush(Color.FromRgb(0, 120, 212)));
 
+        // 便签分类：8 个固定预设，仅描边颜色区分（分类名即颜色名，不可自定义）。
+        // 灰为默认分类；画刷冻结后跨实例复用（同 NormalBorderBrush/HoverBorderBrush 先例）
+        private static readonly (string Name, Brush Brush)[] NoteCategories =
+        {
+            ("红", Freeze(new SolidColorBrush(Color.FromRgb(0xE8, 0x11, 0x23)))),
+            ("橙", Freeze(new SolidColorBrush(Color.FromRgb(0xFF, 0x8C, 0x00)))),
+            ("黄", Freeze(new SolidColorBrush(Color.FromRgb(0xFF, 0xB9, 0x00)))),
+            ("绿", Freeze(new SolidColorBrush(Color.FromRgb(0x10, 0x7C, 0x10)))),
+            ("青", Freeze(new SolidColorBrush(Color.FromRgb(0x00, 0xB7, 0xC3)))),
+            ("蓝", Freeze(new SolidColorBrush(Color.FromRgb(0x00, 0x78, 0xD4)))),
+            ("紫", Freeze(new SolidColorBrush(Color.FromRgb(0x88, 0x17, 0x98)))),
+            ("灰", Freeze(new SolidColorBrush(Color.FromRgb(0x76, 0x76, 0x76)))),
+        };
+        private const string DefaultCategory = "灰";
+
+        // 会话内上次使用的分类（仅 UI 线程访问，同 _open 约定；不持久化）
+        private static string _lastCategory = DefaultCategory;
+
+        // 按分类名取冻结画刷，非法名防御性回退灰
+        private static Brush CategoryBrush(string name)
+        {
+            foreach (var c in NoteCategories)
+                if (c.Name == name)
+                    return c.Brush;
+            return NoteCategories[^1].Brush; // 灰
+        }
+
         private const double MinZoom = 0.1;   // 缩放下限 10%
         private const double MaxZoom = 5.0;   // 缩放上限 500%
         private const double ZoomStep = 1.1;  // 滚轮缩放步进：×1.1 / ÷1.1
@@ -140,6 +167,7 @@ namespace CommandLauncher
         }
 
         private readonly ContentMode _mode;
+        private string _category = DefaultCategory; // 便签分类名（仅文本模式使用；图片模式不赋值、永不使用）
         private readonly BitmapSource? _source = null;   // 图片模式非空
         private string _text = "";                       // 文本模式非空；编辑落定时更新
         private readonly Image? _image = null;           // 图片模式非空
@@ -188,8 +216,13 @@ namespace CommandLauncher
         /// <summary>把文字钉为便签式贴图浮窗（深色底白字，超高可滚动）。text 须非空（调用方已过滤）。</summary>
         /// <param name="text">要钉的文字</param>
         /// <param name="physicalTopLeft">初始位置（虚拟屏物理像素坐标）</param>
-        public static PinWindow FromText(string text, System.Drawing.Point physicalTopLeft)
-            => new(text, physicalTopLeft);
+        /// <param name="category">便签分类名（8 个预设之一）；null 表示沿用会话上次分类</param>
+        public static PinWindow FromText(string text, System.Drawing.Point physicalTopLeft, string? category = null)
+        {
+            category ??= _lastCategory; // 无显式分类 → 沿用会话上次分类（首贴即灰）
+            _lastCategory = category;   // 创建即记住，F7 连续钉同类便签免重选
+            return new PinWindow(text, physicalTopLeft, category);
+        }
 
         private PinWindow(BitmapSource image, System.Drawing.Point physicalTopLeft)
         {
@@ -236,10 +269,11 @@ namespace CommandLauncher
             ShowInitially();
         }
 
-        private PinWindow(string text, System.Drawing.Point physicalTopLeft)
+        private PinWindow(string text, System.Drawing.Point physicalTopLeft, string category)
         {
             _mode = ContentMode.Text;
             _text = text;
+            _category = category;
             _initialPhysicalTopLeft = physicalTopLeft;
 
             InitChrome();
@@ -288,7 +322,7 @@ namespace CommandLauncher
             _border = new Border
             {
                 BorderThickness = new Thickness(1),
-                BorderBrush = NormalBorderBrush,
+                BorderBrush = CategoryBrush(_category),
                 CornerRadius = new CornerRadius(TextCornerRadius),
                 Background = TextBackgroundBrush,
                 Padding = new Thickness(TextPaddingDip),
@@ -296,7 +330,7 @@ namespace CommandLauncher
                 Child = _textScroll,
             };
             _border.MouseEnter += (s, e) => _border.BorderBrush = HoverBorderBrush;
-            _border.MouseLeave += (s, e) => _border.BorderBrush = NormalBorderBrush;
+            _border.MouseLeave += (s, e) => _border.BorderBrush = CategoryBrush(_category);
             var root = new Grid();
             root.Children.Add(_border);
             root.Children.Add(_hint);
@@ -759,7 +793,7 @@ namespace CommandLauncher
             }
             ApplyTextSize();
             _textScroll!.Content = _textBlock;
-            _border.BorderBrush = NormalBorderBrush;
+            _border.BorderBrush = CategoryBrush(_category);
             ContextMenu = BuildContextMenu();
         }
 
@@ -874,6 +908,23 @@ namespace CommandLauncher
                 menu.Items.Add(CreateMenuItem("编辑", EnterEditMode));
                 menu.Items.Add(CreateMenuItem("复制文本", CopyTextToClipboard));
                 menu.Items.Add(CreateMenuItem("保存为文件…", SaveTextToFile));
+
+                // 分类子菜单：8 个固定预设，当前分类打勾。菜单实例跨多次打开复用
+                // （构造建一次、ExitEditMode 重建一次），Opened 时按 _category 刷新勾选防陈旧
+                var catMenu = new MenuItem { Header = "分类" };
+                foreach (var c in NoteCategories)
+                {
+                    var name = c.Name; // 显式捕获循环变量（foreach 闭包共享同一变量的经典陷阱）
+                    var item = new MenuItem { Header = name, IsCheckable = true, IsChecked = _category == name };
+                    item.Click += (s, e) => SetCategory(name);
+                    catMenu.Items.Add(item);
+                }
+                menu.Items.Add(catMenu);
+                menu.Opened += (s, e) =>
+                {
+                    foreach (MenuItem it in catMenu.Items)
+                        it.IsChecked = it.Header is string h && h == _category;
+                };
             }
             menu.Items.Add(new Separator());
             menu.Items.Add(CreateMenuItem("关闭", () => Close()));
@@ -886,6 +937,15 @@ namespace CommandLauncher
             var item = new MenuItem { Header = header };
             item.Click += (s, e) => onClick();
             return item;
+        }
+
+        // 设置便签分类：更新当前分类、会话记忆与描边颜色（仅文本模式「分类」子菜单调用）
+        private void SetCategory(string name)
+        {
+            _category = name;
+            _lastCategory = name; // 同步会话记忆，F7 连续钉同类便签免重选
+            _border.BorderBrush = CategoryBrush(name);
+            Logger.LogInfo($"文本贴图分类已设为：{name}");
         }
 
         // 复制图像回剪贴板：剪贴板被占用会抛 ExternalException，重试 3 次、每次间隔 50ms
