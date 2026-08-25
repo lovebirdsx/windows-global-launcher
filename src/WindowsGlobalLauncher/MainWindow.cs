@@ -1233,6 +1233,12 @@ namespace CommandLauncher
             UpdateWindow.PrepareForApplicationShutdown();
 
             Logger.LogInfo("程序正在退出");
+
+            // 贴图状态必须在 Shutdown 之前落盘并冻结：Shutdown 会关闭所有 PinWindow，
+            // 每个 Closed 都把自己从 _open 移除，等到 App.OnExit 再保存时列表已空，
+            // 会把 pins.json 覆写成 []（详见 PinStore.FlushForShutdown）。
+            PinStore.FlushForShutdown();
+
             Dispose();
             Application.Current.Shutdown();
         }

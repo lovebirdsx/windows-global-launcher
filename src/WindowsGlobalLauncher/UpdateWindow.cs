@@ -449,6 +449,9 @@ namespace CommandLauncher
                     // 成功：新进程已由 installer 启动并等待本进程退出，这里必须立即关闭本进程
                     Logger.LogInfo($"更新成功（{App.AppVersionString} → {_info.Version}），即将退出当前进程");
                     _allowClose = true;
+                    // 与托盘「退出」同理：Shutdown 之前先把贴图状态落盘并冻结，否则关窗口的
+                    // 连带回调会让 App.OnExit 存下空列表，更新重启后贴图全丢（见 PinStore.FlushForShutdown）
+                    PinStore.FlushForShutdown();
                     System.Windows.Application.Current.Shutdown();
                 }
                 else

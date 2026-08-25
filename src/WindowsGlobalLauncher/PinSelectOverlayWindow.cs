@@ -42,6 +42,7 @@ namespace CommandLauncher
         private bool _dragging;                          // 橡皮筋拖拽进行中
         private System.Drawing.Point _dragStartPhysical; // 拖拽起点（物理像素）
         private IntPtr _previousForeground;              // 框选前的前台窗口（关闭时归还，防系统随机挑窗口激活）
+        private bool _closing;                           // 已进入关闭流程（区分「用户失焦」与关闭时归还前台引发的失活，见 OnDeactivated）
 
         public PinSelectOverlayWindow()
         {
@@ -49,7 +50,16 @@ namespace CommandLauncher
 
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
-            Background = Brushes.Transparent; // 橡皮筋之外的区域全透明，直接透出底下的桌面
+
+            // 背景必须是 alpha 非 0 的「近乎全透明」画刷，绝不能退回 Brushes.Transparent（alpha=0）：
+            // AllowsTransparency=true 的窗口走 Win32 分层窗口（WS_EX_LAYERED）合成，alpha=0 的像素不
+            // 参与命中测试，鼠标事件直接穿透到下层窗口——橡皮筋拖不出来，遮罩收不到任何输入，而它
+            // 又没有失焦关闭逻辑的话就会全透明地隐形挂死在最上层（PinWindow._boxSelecting 卡在 true，
+            // 框选热键从此永久失效）。也不能照搬截图遮罩的 AllowsTransparency=false + 不透明黑底：
+            // 框选遮罩没有冻结帧，必须透出真实桌面。alpha=1（≈0.4%）视觉上不可察觉，却让整窗参与命中测试。
+            var nearTransparentBg = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
+            nearTransparentBg.Freeze();
+            Background = nearTransparentBg;
             Topmost = true;
             ShowInTaskbar = false;
             ShowActivated = false; // 不抢焦点，激活统一走 Loaded 里的 WindowEnumerator.Activate
@@ -166,12 +176,40 @@ namespace CommandLauncher
         }
 
         /// <summary>
+        /// 失焦即取消本次框选并关闭遮罩（不改变已有选中）。框选会话本是一次性交互，失焦即取消符合
+        /// MainWindow/ClipboardWindow「失焦即隐藏」的既有风格；更重要的是兜底防卡死——即使将来
+        /// 遮罩再因故收不到输入，也会随失焦立即关闭、复位 PinWindow._boxSelecting，而不是隐形挂死。
+        /// 不会误触发：本窗以 ShowActivated=false 弹出，只有 OnLoaded 里 WindowEnumerator.Activate
+        /// 成功激活过之后才可能收到 Deactivated（从未激活成功的窗口没有失焦可触发）。
+        ///
+        /// 代价是刻意接受的：拖橡皮筋期间若有别的窗口抢走前台（后台更新检查恰好弹出 UpdateWindow、
+        /// 第三方 Topmost 弹窗等），进行中的框选会被取消，用户需重按框选热键。相比「遮罩隐形挂死、
+        /// 此后框选功能彻底失效且只能重启程序」，取消一次框选是明显更小的代价。
+        /// </summary>
+        protected override void OnDeactivated(EventArgs e)
+        {
+            base.OnDeactivated(e);
+
+            // 已在关闭流程中就不是「用户失焦」了：正常关闭路径（松手/Esc）里 OnClosing 会激活
+            // 框选前的前台窗口，那个 Activate 若目标是本进程同线程的窗口，WM_ACTIVATE 是同步
+            // 派发的——此刻窗口尚未隐藏，单看 IsVisible 会把它误判成失焦、记下一条假的
+            // 「失焦取消框选」日志（行为无害，WPF 的 _isClosing 会吞掉重入的 Close，但日志是
+            // 本项目排查问题的主要依据，不能留假记录）。故用显式的关闭意图标志判定。
+            if (_closing)
+                return;
+
+            Logger.LogInfo("贴图框选遮罩失焦，取消本次框选并关闭");
+            Close();
+        }
+
+        /// <summary>
         /// 关闭进行中（遮罩仍全屏覆盖、尚未销毁）时归还框选前的前台窗口：此刻先把原窗口激活到
         /// 遮罩之下，遮罩销毁时自身已非活动窗口，系统不会再自行挑窗口激活——与截图遮罩
         /// OnClosing 同一做法。置空保证幂等（重复关闭无事发生）。
         /// </summary>
         protected override void OnClosing(CancelEventArgs e)
         {
+            _closing = true; // 归还前台会同步触发 Deactivated，见 OnDeactivated
             if (_previousForeground != IntPtr.Zero && IsWindow(_previousForeground))
                 WindowEnumerator.Activate(_previousForeground);
             _previousForeground = IntPtr.Zero;

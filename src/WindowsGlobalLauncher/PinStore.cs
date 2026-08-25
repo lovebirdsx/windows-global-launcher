@@ -66,10 +66,11 @@ namespace CommandLauncher
             /// <summary>仅文字便签：分类名（8 个预设之一，见 PinWindow.NoteCategories）。</summary>
             public string Category { get; set; } = "";
 
-            /// <summary>窗口位置（DIP，WPF Left）。</summary>
+            /// <summary>内容左上角位置（DIP，= PinWindow.ContentLeft，窗口 Left + 阴影边距）。
+            /// 存内容而非窗口坐标：位置语义与阴影边距常量解耦，改边距不会让老数据整体偏移。</summary>
             public double LeftDip { get; set; }
 
-            /// <summary>窗口位置（DIP，WPF Top）。</summary>
+            /// <summary>内容左上角位置（DIP，= PinWindow.ContentTop），语义同 <see cref="LeftDip"/>。</summary>
             public double TopDip { get; set; }
 
             /// <summary>仅图片贴图：缩放比例（0.1~5.0）。</summary>
@@ -95,6 +96,10 @@ namespace CommandLauncher
             timer.Tick += (s, e) =>
             {
                 timer.Stop();
+                // 纵深防御：调度时刻不在退出流程、真正 tick 时却已进入的情况（timer 排在
+                // 关窗级联之后、dispatcher 关闭之前 tick）同样不能存——那时 OpenPins 已空
+                if (IsTearingDown)
+                    return;
                 SavePins(PinWindow.OpenPins);
             };
             return timer;
@@ -103,6 +108,8 @@ namespace CommandLauncher
         /// <summary>调度一次防抖保存：500ms 内未再触发则落盘；再次触发则重新计时（仅 UI 线程）。</summary>
         public static void ScheduleSave()
         {
+            if (IsTearingDown)
+                return; // 退出流程中的保存请求一律忽略，理由见 IsTearingDown
             try
             {
                 var timer = DeferredTimer;
@@ -116,19 +123,121 @@ namespace CommandLauncher
         }
 
         /// <summary>
-        /// 立即落盘（退出兜底，App.OnExit 调用）：停掉待执行的防抖 timer 并同步保存当前全部贴图。
-        /// 平时强杀/崩溃时 OnExit 不执行，靠交互点保存兜底。
+        /// 保存已冻结：退出流程调过 <see cref="FlushForShutdown"/> 之后置位，
+        /// 此后一切保存请求（防抖调度与 <see cref="SaveNow"/>）全部忽略。仅 UI 线程访问。
         /// </summary>
-        public static void Flush()
+        private static bool _frozen;
+
+        /// <summary>
+        /// 是否处于「不得再保存」的退出流程中。两个来源：
+        /// ① <see cref="_frozen"/>——本程序的退出路径已显式冻结（主力防线，见 <see cref="FlushForShutdown"/>）；
+        /// ② Dispatcher 已开始/完成关闭——兜住未经 ① 的意外退出路径。
+        ///
+        /// 关于 ② 的生效时机（别照着直觉理解）：WPF 的 <c>ShutdownImpl</c> 是**先同步关完所有窗口、
+        /// 之后才 BeginInvokeShutdown</c>，所以关窗级联进行中 <c>HasShutdownStarted</c> 仍是 false——
+        /// ② 挡不住级联里那些 Closed 回调发出的 <see cref="ScheduleSave"/>。它们靠的是别的机制：
+        /// 重启的 500ms timer 在 dispatcher 关闭前来不及 tick，且 App.OnExit 会
+        /// <see cref="StopPendingSave"/> 再停一次；万一真排到了 tick，Tick 处理器里也查这个属性。
+        /// ② 真正的价值在于「dispatcher 已开始关闭之后」仍可能跑到的保存请求。
+        ///
+        /// 为什么宁可漏存也不多存：贴图在每个交互点都已落盘，「退出时少存一次」最多丢最后 500ms 的
+        /// 改动，而「退出时多存一次空列表」（此刻 <c>PinWindow.OpenPins</c> 已被关窗清空）丢的是
+        /// 全部贴图——就是「重启后贴图全丢」那个缺陷。两种风险不对称，故一律偏向不存。
+        /// </summary>
+        private static bool IsTearingDown
         {
+            get
+            {
+                if (_frozen)
+                    return true;
+                var dispatcher = System.Windows.Application.Current?.Dispatcher;
+                return dispatcher != null && (dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished);
+            }
+        }
+
+        /// <summary>
+        /// 立即把当前贴图状态落盘，但**不冻结**保存通道（会话结束预警等「可能不会真的退出」的场景用）。
+        ///
+        /// 与 <see cref="FlushForShutdown"/> 的区别就在冻结与否，这个区别很要紧：
+        /// 系统的注销/关机是**可以被取消的**（别的程序弹出「有未保存的文档」，用户点了取消），
+        /// 那时本进程继续运行。若在这条路径上冻结，此后用户的一切贴图操作都会静默不保存，
+        /// 悄悄丢数据且毫无提示——比重启丢贴图更糟。故这里只存不冻结：
+        /// 真正的退出随后会走 Shutdown，届时该冻结的路径自会冻结。
+        /// </summary>
+        public static void SaveNow()
+        {
+            if (_frozen)
+                return; // 已在退出流程中冻结，不必也不应再存
             try
             {
                 _saveTimer?.Stop();
                 SavePins(PinWindow.OpenPins);
+                Logger.LogInfo($"已保存 {PinWindow.OpenPins.Count} 个贴图状态（会话结束预警）");
             }
             catch (Exception ex)
             {
-                Logger.LogError("贴图退出兜底保存失败", ex);
+                Logger.LogError("保存贴图状态失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 退出前最后一次保存，随后冻结保存通道（必须在 <c>Application.Shutdown()</c> 之前调用）。
+        ///
+        /// 为什么需要它：<c>Shutdown()</c> 会关闭所有 PinWindow，每个窗口的 Closed 回调都会
+        /// 把自己从 <c>PinWindow.OpenPins</c> 移除并顺手 <see cref="ScheduleSave"/>。等到
+        /// App.OnExit 再保存时列表已经空了，于是把 pins.json 覆写成 <c>[]</c>——
+        /// 「重启后贴图全部丢失」正是这么来的，而强杀反而能恢复（OnExit 不执行，
+        /// 交互点存下的数据得以留存），这个反常特征是判定本缺陷的标志。
+        ///
+        /// 所以退出时的正确顺序是「先存盘、再冻结、最后才允许关窗口」：冻结之后
+        /// 关窗连带触发的保存一律忽略，盘上留下的就是用户退出那一刻真实打开的贴图。
+        ///
+        /// 只能用在「调用后进程必定退出」的路径上：托盘「退出」（MainWindow.ExitApplication）
+        /// 与更新重启（UpdateWindow.StartDownloadAsync），两者紧随其后就是 Shutdown，
+        /// 且沿途的 OnClosing 拦截都已由 UpdateWindow.PrepareForApplicationShutdown / _allowClose 放行。
+        /// 可能被取消的场景（如 SessionEnding）必须改用 <see cref="SaveNow"/>，理由见那里。
+        /// 幂等：重复调用只在首次落盘。
+        /// </summary>
+        public static void FlushForShutdown()
+        {
+            if (_frozen)
+                return;
+            try
+            {
+                _saveTimer?.Stop();
+                SavePins(PinWindow.OpenPins);
+                Logger.LogInfo($"退出前已保存 {PinWindow.OpenPins.Count} 个贴图状态");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("退出前保存贴图状态失败", ex);
+            }
+            finally
+            {
+                // 无论保存成功与否都要冻结：保存失败时盘上留的是上一次交互点存下的数据，
+                // 仍然比让后续关窗回调覆写成空列表要好
+                _frozen = true;
+            }
+        }
+
+        /// <summary>
+        /// 停掉待执行的防抖 timer（退出清理，App.OnExit 调用）。
+        ///
+        /// 刻意**不在这里保存**：OnExit 执行时 <c>Shutdown()</c> 早已把所有贴图窗口关完、
+        /// <c>PinWindow.OpenPins</c> 必然是空的，此刻保存等于把 pins.json 覆写成 <c>[]</c>——
+        /// 这正是「重启后贴图全部丢失」的成因（原先这里调的是一个会保存的 Flush）。
+        /// 真正的退出前保存已提前到 <see cref="FlushForShutdown"/>（Shutdown 之前、窗口尚在时），
+        /// 未走那条路径的意外退出则靠各交互点的防抖保存兜底（最多丢最后 500ms 的改动）。
+        /// </summary>
+        public static void StopPendingSave()
+        {
+            try
+            {
+                _saveTimer?.Stop();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("停止贴图防抖保存失败", ex);
             }
         }
 
@@ -149,8 +258,8 @@ namespace CommandLauncher
                         IsImage = pin.IsImagePin,
                         Text = pin.IsImagePin ? "" : pin.PinText,
                         Category = pin.IsImagePin ? "" : pin.PinCategory,
-                        LeftDip = pin.Left,
-                        TopDip = pin.Top,
+                        LeftDip = pin.ContentLeft, // 存内容左上角（窗口 Left + 阴影边距），恢复时 ApplyRestoredState 反向换算
+                        TopDip = pin.ContentTop,
                         Zoom = pin.IsImagePin ? pin.PinZoom : 1.0,
                         Opacity = pin.Opacity,
                     };

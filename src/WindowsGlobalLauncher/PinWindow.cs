@@ -29,6 +29,8 @@ namespace CommandLauncher
     /// [MinTextWidthDip, TextWidthDip] 且不超所在屏工作区宽，高在 [MinTextHeightDip, 工作区高 60%]。
     /// 构造时读一次 GetDpi，Loaded 后再读一次，若不同（目标显示器 DPI 与初始不同）则按新值校正一次；
     /// 拖动结束时也刷新一次（贴图可能被拖到另一 DPI 的显示器上）。
+    /// 窗口矩形 ≠ 内容矩形：窗口四周留有一圈 ShadowMarginDip 透明边距供悬停阴影绘制，
+    /// 涉及「内容可见位置/大小」的代码必须按内容矩形换算——详见 ShadowMarginDip 常量处注释。
     /// </remarks>
     public sealed class PinWindow : Window
     {
@@ -54,6 +56,23 @@ namespace CommandLauncher
 
         // 悬停阴影（冻结以便跨实例复用）：阴影垂在元素正下方，「浮起」层次感，不动描边颜色
         private static readonly DropShadowEffect PinHoverShadow = CreateHoverShadow();
+
+        // 悬停阴影的外围余量（DIP）：DropShadowEffect 绘制在元素**外侧**（向下偏 ShadowDepth +
+        // 四周铺开 BlurRadius），客户区之外的像素会被窗口裁掉——窗口尺寸精确贴合内容时阴影
+        // 100% 不可见。故窗口四周留一圈透明边距供阴影绘制：窗口变大、_border 在其中缩进。
+        // 本值必须 ≥ 阴影的 BlurRadius + ShadowDepth（12 + 3 = 15，取 16 留 1 DIP 富余），
+        // 改 CreateHoverShadow 的参数时要同步复核，否则阴影仍会被裁。
+        //
+        // 由此引入一条新不变式：「窗口矩形 ≠ 内容矩形」——内容矩形（_border 承载的图片/文本
+        // 及提示角标）相对窗口矩形四周各缩进 ShadowMarginDip。凡涉及「内容在屏幕上的可见位置/
+        // 大小」一律用内容矩形，凡涉及「窗口本身几何」（Left/Top/Width/Height 直接读写、拖动平移）
+        // 仍用窗口矩形。必须用内容矩形的地方（漏掉任何一处都会错位）：
+        //   ① PhysicalBounds —— 框选命中测试，否则会命中看不见的透明边距；
+        //   ② 持久化 LeftDip/TopDip（ContentLeft/ContentTop）—— 存内容左上角，改本常量不偏移；
+        //   ③ ClampOutsideToNearestScreen / ClampIntoWorkingArea 的可见性判定与钳制；
+        //   ④ _initialPhysicalTopLeft —— 内容左上角物理像素，Loaded DPI 校正重算 Left/Top 的依据。
+        // 反向换算：内容左上角 = 窗口 Left/Top + ShadowMarginDip，窗口宽高 = 内容宽高 + 2 × 本值。
+        private const double ShadowMarginDip = 16.0;
 
         private static DropShadowEffect CreateHoverShadow()
         {
@@ -231,7 +250,8 @@ namespace CommandLauncher
         private System.Drawing.Point _lastPressCursor;   // 上一次按下时的光标（物理像素）
         private bool _sawReleaseSincePress = true;       // 上次按下之后是否见过释放（初始 true，首击不受影响）
 
-        // 初始位置（物理像素），Loaded 校正 DPI 时用。非 readonly：恢复持久化状态时需要回写它，
+        // 初始位置（物理像素，**内容左上角**——不是窗口左上角，窗口左上角 = 它 − 阴影边距），
+        // Loaded 校正 DPI 时用。非 readonly：恢复持久化状态时需要回写它，
         // 否则 OnLoadedRecheckDpi 会按旧值把恢复位置弹回去（见 ApplyRestoredState）
         private System.Drawing.Point _initialPhysicalTopLeft;
         private double _dpiScaleX = 1.0;
@@ -265,7 +285,8 @@ namespace CommandLauncher
 
             InitChrome();
 
-            // 内容：1 DIP 描边 Border（无圆角，保证图像边缘像素完整）包 Image；左上角叠提示角标
+            // 内容：1 DIP 描边 Border（无圆角，保证图像边缘像素完整）包 Image；左上角叠提示角标。
+            // _border 四周留 ShadowMarginDip 透明边距给悬停阴影（见常量注释），图像显示尺寸不变
             _image = new Image { Source = image, Stretch = Stretch.Fill };
             RenderOptions.SetBitmapScalingMode(_image, BitmapScalingMode.HighQuality);
             _border = new Border
@@ -273,6 +294,7 @@ namespace CommandLauncher
                 BorderThickness = new Thickness(1),
                 BorderBrush = NormalBorderBrush,
                 Cursor = Cursors.SizeAll, // 悬停提示可拖动
+                Margin = new Thickness(ShadowMarginDip), // 缩进让阴影画在窗口内
                 Child = _image,
             };
             _border.MouseEnter += (s, e) => _border.Effect = PinHoverShadow;
@@ -291,10 +313,12 @@ namespace CommandLauncher
             _dpiScaleY = dpi.DpiScaleY;
             _baseWidthDip = image.PixelWidth / _dpiScaleX;   // 1:1 物理像素 → 基准 DIP（物理 → DIP 用除法）
             _baseHeightDip = image.PixelHeight / _dpiScaleY;
-            Width = _baseWidthDip;
-            Height = _baseHeightDip;
-            Left = physicalTopLeft.X / _dpiScaleX;
-            Top = physicalTopLeft.Y / _dpiScaleY;
+            Width = _baseWidthDip + ShadowMarginDip * 2;     // 窗口 = 内容 + 两侧阴影边距
+            Height = _baseHeightDip + ShadowMarginDip * 2;
+            // physicalTopLeft 是内容左上角（物理像素），窗口左上角 = 内容左上角 − 边距，
+            // 否则内容视觉位置会整体右下偏移 ShadowMarginDip
+            Left = physicalTopLeft.X / _dpiScaleX - ShadowMarginDip;
+            Top = physicalTopLeft.Y / _dpiScaleY - ShadowMarginDip;
             ClampOutsideToNearestScreen();
 
             Loaded += OnLoadedRecheckDpi;
@@ -360,6 +384,7 @@ namespace CommandLauncher
                 Background = TextBackgroundBrush,
                 Padding = new Thickness(TextPaddingDip),
                 Cursor = Cursors.SizeAll, // 悬停提示可拖动
+                Margin = new Thickness(ShadowMarginDip), // 缩进让阴影画在窗口内
                 Child = _textScroll,
             };
             _border.MouseEnter += (s, e) => _border.Effect = PinHoverShadow;
@@ -375,8 +400,9 @@ namespace CommandLauncher
             var dpi = VisualTreeHelper.GetDpi(this);
             _dpiScaleX = dpi.DpiScaleX;
             _dpiScaleY = dpi.DpiScaleY;
-            Left = physicalTopLeft.X / _dpiScaleX; // 物理 → DIP 用除法
-            Top = physicalTopLeft.Y / _dpiScaleY;
+            // physicalTopLeft 是内容左上角（物理像素），窗口左上角再减阴影边距（同图片模式）
+            Left = physicalTopLeft.X / _dpiScaleX - ShadowMarginDip; // 物理 → DIP 用除法
+            Top = physicalTopLeft.Y / _dpiScaleY - ShadowMarginDip;
             ApplyTextSize();
             ClampOutsideToNearestScreen();
 
@@ -558,10 +584,18 @@ namespace CommandLauncher
         /// <summary>贴图唯一标识（构造生成，同 PinStore.PinEntry.Id）。</summary>
         internal string PinId => _id;
 
-        /// <summary>窗口当前矩形（虚拟屏物理像素）：DIP × 当前 DPI 快照换算。</summary>
+        /// <summary>内容左上角 X（DIP，窗口 Left + 阴影边距）。持久化用——存内容而非窗口坐标，
+        /// 语义与 ShadowMarginDip 解耦（改边距常量不会让老数据整体偏移），见常量注释 ②。</summary>
+        internal double ContentLeft => Left + ShadowMarginDip;
+
+        /// <summary>内容左上角 Y（DIP），语义同 <see cref="ContentLeft"/>。</summary>
+        internal double ContentTop => Top + ShadowMarginDip;
+
+        /// <summary>内容矩形（虚拟屏物理像素）：窗口矩形四周缩进 ShadowMarginDip 后换算——
+        /// 框选命中测试必须用内容矩形，否则会命中贴图周围看不见的透明边距（见常量注释 ①）。</summary>
         internal System.Drawing.RectangleF PhysicalBounds => new(
-            (float)(Left * _dpiScaleX), (float)(Top * _dpiScaleY),
-            (float)(Width * _dpiScaleX), (float)(Height * _dpiScaleY));
+            (float)((Left + ShadowMarginDip) * _dpiScaleX), (float)((Top + ShadowMarginDip) * _dpiScaleY),
+            (float)((Width - ShadowMarginDip * 2) * _dpiScaleX), (float)((Height - ShadowMarginDip * 2) * _dpiScaleY));
 
         /// <summary>当前全部已打开贴图（仅 UI 线程访问；供 PinStore 枚举保存）。</summary>
         internal static IReadOnlyList<PinWindow> OpenPins => _open;
@@ -572,7 +606,7 @@ namespace CommandLauncher
         /// </summary>
         internal static PinWindow RestoreFromEntry(PinStore.PinEntry entry, BitmapSource? image)
         {
-            // 构造需要物理像素坐标，先用 DIP 原值充当近似物理点（构造里的位置随后会被
+            // 构造需要内容左上角的物理像素坐标，先用 DIP 原值充当近似物理点（构造里的位置随后会被
             // ApplyRestoredState 按持久化 DIP 覆写），只为让构造走完初始化流程
             var approx = new System.Drawing.Point((int)entry.LeftDip, (int)entry.TopDip);
             // 手改 JSON 可能出现非法分类名：CategoryBrush 虽回退灰描边，但非法名会原样进入
@@ -591,14 +625,17 @@ namespace CommandLauncher
             if (_mode == ContentMode.Image)
             {
                 _zoom = Math.Clamp(entry.Zoom, MinZoom, MaxZoom);
-                Width = _baseWidthDip * _zoom;
-                Height = _baseHeightDip * _zoom;
+                Width = _baseWidthDip * _zoom + ShadowMarginDip * 2; // 窗口 = 内容 + 两侧阴影边距
+                Height = _baseHeightDip * _zoom + ShadowMarginDip * 2;
             }
-            Left = entry.LeftDip;
-            Top = entry.TopDip;
+            // 持久化存的是内容左上角（ContentLeft/ContentTop），窗口左上角反向减边距
+            Left = entry.LeftDip - ShadowMarginDip;
+            Top = entry.TopDip - ShadowMarginDip;
             Opacity = Math.Clamp(entry.Opacity, MinOpacity, 1.0);
+            // _initialPhysicalTopLeft 语义是内容左上角物理像素（见常量注释 ④），取内容坐标换算；
+            // 四舍五入比向零截断少亚像素漂移（仅 DPI 变化触发重算时用得到）
             _initialPhysicalTopLeft = new System.Drawing.Point(
-                (int)Math.Round(Left * _dpiScaleX), (int)Math.Round(Top * _dpiScaleY)); // 四舍五入比向零截断少亚像素漂移（仅 DPI 变化触发重算时用得到）
+                (int)Math.Round((Left + ShadowMarginDip) * _dpiScaleX), (int)Math.Round((Top + ShadowMarginDip) * _dpiScaleY));
             if (_mode == ContentMode.Text)
                 ApplyTextSize();
             ClampOutsideToNearestScreen();
@@ -615,7 +652,14 @@ namespace CommandLauncher
         {
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
-            Background = Brushes.Transparent; // 让整窗可命中测试，视觉背景由内容承载
+            // 视觉背景由内容（_border）承载，窗口本身透明。
+            // 注意 alpha=0 的像素在分层窗口（AllowsTransparency=true）下鼠标穿透，所以自
+            // ShadowMarginDip 引入后，_border 四周那圈边距**未悬停时是穿透区**（点击/滚轮落到
+            // 下层窗口）——这不影响使用：那圈本就不可见，而一旦鼠标进入 _border 触发悬停阴影，
+            // 阴影像素令边距变为可命中，连阴影区域也能拖动。
+            // 同一 alpha=0 机制在 PinSelectOverlayWindow 那里是致命的（整窗都收不到输入），
+            // 详见该文件构造函数注释；此处刻意保留 Transparent。
+            Background = Brushes.Transparent;
             Topmost = true;
             ShowInTaskbar = false;
             ShowActivated = false; // 弹出不抢焦点；用户点击后自然获得焦点以接收 Esc
@@ -626,7 +670,8 @@ namespace CommandLauncher
             {
                 HorizontalAlignment = HorizontalAlignment.Left,
                 VerticalAlignment = VerticalAlignment.Top,
-                Margin = new Thickness(6),
+                // 相对内容区（_border 内缩后的可见区域）左上角定位：仅 +6 会落在透明边距里
+                Margin = new Thickness(ShadowMarginDip + 6),
                 Padding = new Thickness(6, 2, 6, 2),
                 Background = new SolidColorBrush(Color.FromArgb(160, 0, 0, 0)),
                 IsHitTestVisible = false, // 纯展示：不挡拖动/悬停描边
@@ -662,7 +707,7 @@ namespace CommandLauncher
                 Logger.LogInfo($"贴图已关闭：{contentDesc}，剩余 {_open.Count} 个");
                 PinStore.ScheduleSave(); // 关闭后集合已不含它，保存最新列表
             };
-            Logger.LogInfo($"贴图已创建：{contentDesc}，初始位置 ({_initialPhysicalTopLeft.X}, {_initialPhysicalTopLeft.Y})（物理像素），当前共 {_open.Count} 个");
+            Logger.LogInfo($"贴图已创建：{contentDesc}，初始内容左上角 ({_initialPhysicalTopLeft.X}, {_initialPhysicalTopLeft.Y})（物理像素），当前共 {_open.Count} 个");
             PinStore.ScheduleSave(); // 新建即保存（恢复重启前关闭的贴图丢失的防御）
         }
 
@@ -689,29 +734,32 @@ namespace CommandLauncher
             {
                 _baseWidthDip = _source!.PixelWidth / _dpiScaleX;
                 _baseHeightDip = _source!.PixelHeight / _dpiScaleY;
-                Width = _baseWidthDip * _zoom;
-                Height = _baseHeightDip * _zoom;
-                Left = _initialPhysicalTopLeft.X / _dpiScaleX;
-                Top = _initialPhysicalTopLeft.Y / _dpiScaleY;
+                Width = _baseWidthDip * _zoom + ShadowMarginDip * 2; // 窗口 = 内容 + 两侧阴影边距
+                Height = _baseHeightDip * _zoom + ShadowMarginDip * 2;
+                // _initialPhysicalTopLeft 是内容左上角物理像素，窗口左上角再减边距
+                Left = _initialPhysicalTopLeft.X / _dpiScaleX - ShadowMarginDip;
+                Top = _initialPhysicalTopLeft.Y / _dpiScaleY - ShadowMarginDip;
                 ClampOutsideToNearestScreen();
             }
             else
             {
                 // 文本尺寸为 DIP 语义（DPI 无关），但位置需按物理像素重换算、高度钳制依赖 scale 需重算
-                Left = _initialPhysicalTopLeft.X / _dpiScaleX;
-                Top = _initialPhysicalTopLeft.Y / _dpiScaleY;
+                Left = _initialPhysicalTopLeft.X / _dpiScaleX - ShadowMarginDip;
+                Top = _initialPhysicalTopLeft.Y / _dpiScaleY - ShadowMarginDip;
                 ApplyTextSize();
                 ClampOutsideToNearestScreen();
             }
         }
 
-        // 初始位置完全落在虚拟屏外时，拉回到最近屏幕的工作区内（坐标先换算成物理像素判定）
+        // 内容完全落在虚拟屏外时，拉回到最近屏幕的工作区内（坐标先换算成物理像素判定）。
+        // 判定与钳制对象是内容矩形（用户关心内容可见，不关心透明阴影边距）——窗口矩形四周
+        // 各缩进 ShadowMarginDip 换算，拉回后窗口位置 = 内容目标位置 − 边距（见常量注释 ③）
         private void ClampOutsideToNearestScreen()
         {
-            double physL = Left * _dpiScaleX;
-            double physT = Top * _dpiScaleY;
-            double physW = Width * _dpiScaleX;   // DIP → 物理用乘法
-            double physH = Height * _dpiScaleY;
+            double physL = (Left + ShadowMarginDip) * _dpiScaleX;
+            double physT = (Top + ShadowMarginDip) * _dpiScaleY;
+            double physW = (Width - ShadowMarginDip * 2) * _dpiScaleX;   // DIP → 物理用乘法
+            double physH = (Height - ShadowMarginDip * 2) * _dpiScaleY;
 
             foreach (var s in System.Windows.Forms.Screen.AllScreens)
             {
@@ -723,8 +771,8 @@ namespace CommandLauncher
             var wa = System.Windows.Forms.Screen.FromPoint(new System.Drawing.Point((int)physL, (int)physT)).WorkingArea;
             double newL = physW >= wa.Width ? wa.Left : Math.Clamp(physL, wa.Left, wa.Right - physW);
             double newT = physH >= wa.Height ? wa.Top : Math.Clamp(physT, wa.Top, wa.Bottom - physH);
-            Left = newL / _dpiScaleX; // 物理 → DIP 用除法
-            Top = newT / _dpiScaleY;
+            Left = newL / _dpiScaleX - ShadowMarginDip; // 物理 → DIP 用除法；内容位置 − 边距 = 窗口位置
+            Top = newT / _dpiScaleY - ShadowMarginDip;
         }
 
         /// <summary>
@@ -762,16 +810,20 @@ namespace CommandLauncher
                 // 会比测量结果提前一个词折行、凭空多出一行
                 contentW = Math.Min(contentW + CaretSlackDip, maxContentW);
 
-            double width = contentW + chromeW;
+            // 完整窗口宽 = 内容 + chrome + 两侧阴影边距（_editMinWidthDip 同为完整窗口宽，量纲一致）
+            double width = contentW + chromeW + ShadowMarginDip * 2;
             if (editingText != null)
                 width = Math.Max(width, _editMinWidthDip); // 编辑中宽度只增不减，避免退格删字时窗口左右跳、光标跟着抖
 
+            // 整体（含边距）做 SnapUpToPixel：窗口总尺寸最终经 SetWindowPos 落成整数物理像素，
+            // 小数被抹掉会连带内容区短一截、ScrollViewer 误判装不下弹出多余滚动条（历史坑，见
+            // SnapUpToPixel 注释）——只把内容部分 Snap 而边距留小数的话，窗口整体抹小数同样会复发
             Width = SnapUpToPixel(width, _dpiScaleX);
-            // 编辑中窗口保持最大尺寸（进入编辑时已放大到 maxContentH + chromeH），内容超高由
+            // 编辑中窗口保持最大尺寸（进入编辑时已放大到 maxContentH + chromeH + 边距），内容超高由
             // ScrollViewer 滚动；落定后（editingText == null）按内容缩回自适应高度
-            double height = SnapUpToPixel(content.Height + chromeH, _dpiScaleY);
+            double height = SnapUpToPixel(content.Height + chromeH + ShadowMarginDip * 2, _dpiScaleY);
             if (editingText != null)
-                height = Math.Max(height, SnapUpToPixel(maxContentH + chromeH, _dpiScaleY));
+                height = Math.Max(height, SnapUpToPixel(maxContentH + chromeH + ShadowMarginDip * 2, _dpiScaleY));
             Height = height;
 
             // 滚动条只在真的钳过高度时才出现，不交给 ScrollViewer 自己按浮点比较去猜；
@@ -782,45 +834,49 @@ namespace CommandLauncher
         }
 
         /// <summary>
-        /// 取所在屏工作区并算出内容区尺寸上限（DIP，不含 chrome）。
-        /// 与 ApplyTextSize 既有口径一致：winPt 用窗口当前位置 × _dpiScale 取物理像素，
-        /// maxContentW = min(TextWidthDip, 工作区宽 DIP) − chrome，maxContentH = 工作区高 DIP × 60% − chrome，
-        /// 下限 Math.Max(x, 1)。编辑态放大（EnterEditMode）与自适应测量（ApplyTextSize）共用。
+        /// 取所在屏工作区并算出内容区尺寸上限（DIP，不含 chrome，也不含阴影边距）。
+        /// 与 ApplyTextSize 既有口径一致：winPt 用内容左上角当前位置 × _dpiScale 取物理像素
+        /// （贴图可能已被拖到其它屏），maxContentW = min(TextWidthDip, 工作区宽 DIP − 两侧阴影边距)
+        /// − chrome，maxContentH = 工作区高 DIP × 60% − 两侧阴影边距 − chrome，
+        /// 下限 Math.Max(x, 1)。边距必须计入：窗口比内容大 2 × ShadowMarginDip，
+        /// 不扣的话编辑态放大后的窗口会超出工作区。编辑态放大（EnterEditMode）与自适应测量
+        /// （ApplyTextSize）共用。
         /// </summary>
         private (double MaxContentW, double MaxContentH) GetMaxContentSize()
         {
-            // 用窗口当前位置所在屏（贴图可能已被拖到其它屏），物理像素坐标
-            var winPt = new System.Drawing.Point((int)(Left * _dpiScaleX), (int)(Top * _dpiScaleY));
+            // 用内容左上角当前位置所在屏（贴图可能已被拖到其它屏），物理像素坐标
+            var winPt = new System.Drawing.Point((int)((Left + ShadowMarginDip) * _dpiScaleX), (int)((Top + ShadowMarginDip) * _dpiScaleY));
             var wa = System.Windows.Forms.Screen.FromPoint(winPt).WorkingArea;
 
             double chromeW = BorderDip + TextPaddingDip * 2; // 两侧描边 + 内边距，内容区之外的固定开销
             double chromeH = chromeW;
-            double maxContentW = Math.Min(TextWidthDip, wa.Width / _dpiScaleX) - chromeW;  // 物理 → DIP 用除法
-            double maxContentH = wa.Height / _dpiScaleY * TextMaxHeightRatio - chromeH;
+            double maxContentW = Math.Min(TextWidthDip, wa.Width / _dpiScaleX - ShadowMarginDip * 2) - chromeW;  // 物理 → DIP 用除法
+            double maxContentH = wa.Height / _dpiScaleY * TextMaxHeightRatio - ShadowMarginDip * 2 - chromeH;
             maxContentW = Math.Max(maxContentW, 1);
             maxContentH = Math.Max(maxContentH, 1);
             return (maxContentW, maxContentH);
         }
 
         /// <summary>
-        /// 把窗口位置钳进所在屏工作区（保证放大后的窗口完整可见）：物理右/下边缘超出工作区
-        /// 则回收到边缘内；窗口大于工作区时贴左上角。Left/Top 是 DIP，判定先换算物理像素。
+        /// 把内容矩形钳进所在屏工作区（保证放大后的窗口内容完整可见）：物理右/下边缘超出工作区
+        /// 则回收到边缘内；内容大于工作区时贴左上角。判定对象是内容矩形（窗口四周的透明阴影
+        /// 边距不算可见内容，见常量注释 ③）；Left/Top 是 DIP，判定先换算物理像素。
         /// </summary>
         private void ClampIntoWorkingArea()
         {
-            var winPt = new System.Drawing.Point((int)(Left * _dpiScaleX), (int)(Top * _dpiScaleY));
+            var winPt = new System.Drawing.Point((int)((Left + ShadowMarginDip) * _dpiScaleX), (int)((Top + ShadowMarginDip) * _dpiScaleY));
             var wa = System.Windows.Forms.Screen.FromPoint(winPt).WorkingArea;
 
-            double physW = Width * _dpiScaleX;   // DIP → 物理用乘法
-            double physH = Height * _dpiScaleY;
-            double physL = Left * _dpiScaleX;
-            double physT = Top * _dpiScaleY;
+            double physW = (Width - ShadowMarginDip * 2) * _dpiScaleX;   // DIP → 物理用乘法（内容宽）
+            double physH = (Height - ShadowMarginDip * 2) * _dpiScaleY;
+            double physL = (Left + ShadowMarginDip) * _dpiScaleX;
+            double physT = (Top + ShadowMarginDip) * _dpiScaleY;
 
-            // 窗口大于工作区时贴左上角；否则右/下边缘超出则回收（宽/高已由尺寸上限保证 ≤ 工作区）
+            // 内容大于工作区时贴左上角；否则右/下边缘超出则回收（宽/高已由尺寸上限保证 ≤ 工作区）
             double newPhysL = physW >= wa.Width ? wa.Left : Math.Clamp(physL, wa.Left, wa.Right - physW);
             double newPhysT = physH >= wa.Height ? wa.Top : Math.Clamp(physT, wa.Top, wa.Bottom - physH);
-            Left = newPhysL / _dpiScaleX; // 物理 → DIP 用除法
-            Top = newPhysT / _dpiScaleY;
+            Left = newPhysL / _dpiScaleX - ShadowMarginDip; // 物理 → DIP 用除法；内容位置 − 边距 = 窗口位置
+            Top = newPhysT / _dpiScaleY - ShadowMarginDip;
         }
 
         /// <summary>
@@ -1053,14 +1109,15 @@ namespace CommandLauncher
                 return;
             _isEditing = true;
 
-            // 进入编辑即放大到最大尺寸（宽 = 内容上限 + chrome，高 = 高度上限 + chrome），方便编辑长文本；
+            // 进入编辑即放大到最大尺寸（宽 = 内容上限 + chrome，高 = 高度上限 + chrome，外加两侧
+            // 阴影边距——GetMaxContentSize 已把边距从工作区上限里扣掉，这里加回才是完整窗口尺寸）；
             // 位置同步钳制进工作区，保证放大后的窗口完整可见。退出编辑时 ApplyTextSize 按内容缩回。
             var (maxContentW, maxContentH) = GetMaxContentSize();
-            Width = SnapUpToPixel(maxContentW + BorderDip + TextPaddingDip * 2, _dpiScaleX);
-            Height = SnapUpToPixel(maxContentH + BorderDip + TextPaddingDip * 2, _dpiScaleY);
+            Width = SnapUpToPixel(maxContentW + BorderDip + TextPaddingDip * 2 + ShadowMarginDip * 2, _dpiScaleX);
+            Height = SnapUpToPixel(maxContentH + BorderDip + TextPaddingDip * 2 + ShadowMarginDip * 2, _dpiScaleY);
             ClampIntoWorkingArea();
 
-            _editMinWidthDip = Width; // 编辑中宽度只增不减的下限（取到的就是放大后的最大宽）
+            _editMinWidthDip = Width; // 编辑中宽度只增不减的下限（取到的就是放大后的最大宽，含阴影边距，与 ApplyTextSize 的 width 同量纲）
             _editBox!.Text = _text;
             _textScroll!.Content = _editBox;
             _border.BorderBrush = HoverBorderBrush;
@@ -1171,14 +1228,15 @@ namespace CommandLauncher
             }
         }
 
-        // 应用缩放：窗口尺寸 = 基准 DIP × zoom；缩放后光标下的图像点保持不动——
+        // 应用缩放：窗口尺寸 = 基准 DIP × zoom + 两侧阴影边距；缩放后光标下的图像点保持不动——
         // 光标在图像中的相对位置 fx=p/oldImgW 不动 ⇒ Left' = Left + p − fx×newImgW（两侧 1 DIP 描边在等式两边抵消）。
         private void ApplyZoom(double newZoom, System.Windows.Point anchorInImage)
         {
             newZoom = Math.Clamp(newZoom, MinZoom, MaxZoom);
 
-            double oldImgW = Width - BorderDip; // 图像可视区（DIP），与 newImgW 同一约定以保证锚点数学自洽
-            double oldImgH = Height - BorderDip;
+            // 图像可视区（DIP）= 窗口 − 两侧阴影边距 − 两侧描边；与 newImgW 同一约定以保证锚点数学自洽
+            double oldImgW = Width - ShadowMarginDip * 2 - BorderDip;
+            double oldImgH = Height - ShadowMarginDip * 2 - BorderDip;
             _zoom = newZoom;
             double newW = _baseWidthDip * _zoom;
             double newH = _baseHeightDip * _zoom;
@@ -1190,8 +1248,8 @@ namespace CommandLauncher
                 Left += anchorInImage.X - anchorInImage.X / oldImgW * newImgW;
                 Top += anchorInImage.Y - anchorInImage.Y / oldImgH * newImgH;
             }
-            Width = newW;
-            Height = newH;
+            Width = newW + ShadowMarginDip * 2; // 窗口 = 图像基准 DIP + 两侧阴影边距
+            Height = newH + ShadowMarginDip * 2;
             ShowBadge($"{Percent(_zoom)}%");
             PinStore.ScheduleSave(); // 缩放经防抖合并（连续滚轮只落盘一次）
         }
@@ -1200,8 +1258,8 @@ namespace CommandLauncher
         private void ResetZoom()
         {
             _zoom = 1.0;
-            Width = _baseWidthDip;
-            Height = _baseHeightDip;
+            Width = _baseWidthDip + ShadowMarginDip * 2; // 窗口 = 图像基准 DIP + 两侧阴影边距
+            Height = _baseHeightDip + ShadowMarginDip * 2;
             ShowBadge("100%");
         }
 

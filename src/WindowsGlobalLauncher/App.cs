@@ -58,6 +58,17 @@ namespace CommandLauncher
             // 恢复上次退出时仍打开的贴图（图片贴图与文字便签；整体隐藏状态不记忆，恢复后直接显示）
             PinStore.RestorePins();
 
+            // 注销/关机时也要先把贴图状态落盘：这条路径不经托盘「退出」，随后的 Shutdown 关窗口时
+            // 连带触发的保存同样会让 OnExit 存下空列表。
+            // 刻意用 SaveNow（只存不冻结）而非 FlushForShutdown：会话结束是可以被取消的
+            // （别的程序弹「有未保存的文档」、用户点了取消），此时本进程继续运行，
+            // 冻结会让此后所有贴图操作静默不保存。真要退出的话随后自会走 Shutdown 那条路径。
+            SessionEnding += (s, args) =>
+            {
+                Logger.LogInfo($"系统会话即将结束（{args.ReasonSessionEnding}），保存贴图状态");
+                PinStore.SaveNow();
+            };
+
             // 清理历史遗留的孤儿 OCR 引擎进程（主程序曾被强杀/崩溃退出时，常驻子进程不会随之退出）
             _ = Task.Run(RapidOcrBackend.KillOrphanedEngines);
 
@@ -104,9 +115,10 @@ namespace CommandLauncher
             // 还原全屏颜色矩阵，避免护眼效果在进程退出后残留
             EyeCareManager.ResetEffect();
 
-            // 贴图状态退出兜底保存：防抖 timer 可能尚未到期，这里停掉并立即落盘
-            // （强杀/崩溃时 OnExit 不执行，靠各交互点的防抖保存兜底，见 PinStore）
-            PinStore.Flush();
+            // 停掉可能待执行的贴图防抖保存。刻意不在这里保存：此刻 Shutdown 已关完所有贴图窗口、
+            // 列表为空，保存只会把 pins.json 覆写成空（原先此处调用会保存的 Flush，正是
+            // 「重启后贴图全丢」的成因）。退出前保存已提前到 Shutdown 之前的 FlushForShutdown。
+            PinStore.StopPendingSave();
 
             // 关闭增强 OCR 常驻子进程（幂等；失败不能影响其它退出清理）
             try
