@@ -4,7 +4,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <!-- 版本号唯一来源：发布时由 CI 用 -p:Version=<tag去掉v前缀> 覆盖，运行期从程序集特性读取（见 App.AppVersion） -->
-    <Version>1.0.6</Version>
+    <Version>1.0.7</Version>
     <RootNamespace>windows_global_launcher</RootNamespace>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
