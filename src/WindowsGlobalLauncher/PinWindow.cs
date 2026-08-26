@@ -1361,14 +1361,46 @@ namespace CommandLauncher
             Logger.LogWarning("贴图复制到剪贴板失败（重试 3 次仍被占用）");
         }
 
-        // 复制文本回剪贴板：重试策略同 CopyImageToClipboard
+        // 复制文本回剪贴板：框选选中多个文本便签时，改为复制所有选中便签的文本（按屏幕位置排序、
+        // 换行连接），而非仅复制当前这一个——这是「框选 → 批量复制文本」的入口；否则维持单便签行为。
         private void CopyTextToClipboard()
+        {
+            if (_selected.Contains(this) && _selected.Count(p => !p.IsImagePin) >= 2)
+            {
+                CopySelectedTextsToClipboard();
+                return;
+            }
+            SetTextWithRetry(_text, "贴图文本复制到剪贴板失败（重试 3 次仍被占用）");
+        }
+
+        // 复制所有选中文本便签的文本：按屏幕位置（从上到下、从左到右）排序，每个便签文本用换行符连接。
+        // 排序用 PhysicalBounds（内容矩形·虚拟屏物理像素，与框选命中测试同坐标系），保证「框选选中哪些」
+        // 和「按什么顺序复制」使用同一套位置语义；编辑中的便签不参与（与 EnumerateSelectablePins 同口径）。
+        private static void CopySelectedTextsToClipboard()
+        {
+            var texts = _selected
+                .Where(p => !p.IsImagePin && !p._isEditing)
+                .OrderBy(p => p.PhysicalBounds.Y)
+                .ThenBy(p => p.PhysicalBounds.X)
+                .Select(p => p.PinText)
+                .ToList();
+            if (texts.Count == 0)
+            {
+                Logger.LogInfo("选中集合不含文本便签，跳过批量复制");
+                return;
+            }
+            SetTextWithRetry(string.Join("\n", texts), "贴图选中文本复制到剪贴板失败（重试 3 次仍被占用）");
+            Logger.LogInfo($"已复制 {texts.Count} 个文本便签的文本到剪贴板");
+        }
+
+        // 写文本到剪贴板：ExternalException 重试 3 次、每次间隔 50ms（同 CopyImageToClipboard 口径）
+        private static void SetTextWithRetry(string text, string failMessage)
         {
             for (int attempt = 0; attempt < 3; attempt++)
             {
                 try
                 {
-                    Clipboard.SetText(_text);
+                    Clipboard.SetText(text);
                     return;
                 }
                 catch (ExternalException)
@@ -1376,7 +1408,7 @@ namespace CommandLauncher
                     Thread.Sleep(50);
                 }
             }
-            Logger.LogWarning("贴图文本复制到剪贴板失败（重试 3 次仍被占用）");
+            Logger.LogWarning(failMessage);
         }
 
         private void SaveToFile()
