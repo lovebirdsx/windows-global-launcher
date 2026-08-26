@@ -69,6 +69,12 @@ namespace CommandLauncher
             _hook.Close += OnClose;
             _hook.MoveMonitor += OnMoveMonitor;
             _hook.IsSwitcherActive = () => _isActive;
+            // 框选选中态下的全局 Esc 取消选中（空白处按 Esc）：查询须在钩子回调线程（UI 线程）轻量，
+            // 实际清空选中等 UI 操作经 Dispatcher.BeginInvoke 异步执行，与动作派发同风格。
+            // 条件额外排除「前台是本进程窗口」——否则会吞掉命令面板/剪贴板历史/截图遮罩/框选遮罩
+            // 等本进程窗口自己的 Esc；贴图自身 OnKeyDown 已会「有选中 → 取消选中」，语义不变。
+            _hook.ShouldCancelSelectionOnEscape = () => PinWindow.IsAnySelected && !PinWindow.IsAnyEditing && !PinWindow.IsForegroundOwnedByThisProcess();
+            _hook.CancelSelection = () => Dispatcher.BeginInvoke(PinWindow.CancelSelectionFromGlobal);
             _hook.Install();
 
             // 装配可配置的窗口动作热键（如 Alt+Q 关闭前台窗口），并跟随配置热更新

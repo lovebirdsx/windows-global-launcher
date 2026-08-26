@@ -118,6 +118,12 @@ namespace CommandLauncher
         /// <summary>由切换器提供：当前切换器是否处于激活态（决定是否吞掉 Esc / 触发 Commit）。</summary>
         public Func<bool>? IsSwitcherActive { get; set; }
 
+        /// <summary>由 PinWindow 提供：当前是否需要在框选选中态下用全局 Esc 取消选中（非切换器激活时）。</summary>
+        public Func<bool>? ShouldCancelSelectionOnEscape { get; set; }
+
+        /// <summary>取消框选选中（由订阅方在 UI 线程安全执行，须轻量）。</summary>
+        public Action? CancelSelection { get; set; }
+
         // 可配置的「热键 → 动作」绑定表（整体替换，仅在 UI 线程读写，与钩子回调同线程，无需加锁）
         private IReadOnlyList<HotKeyActionBinding> _actionBindings = [];
 
@@ -216,6 +222,17 @@ namespace CommandLauncher
                             MoveMonitor?.Invoke(1);
                             return (IntPtr)1;
                     }
+                }
+
+                // 框选选中态下、切换器未激活时的全局 Esc：取消选中（空白处按 Esc 也能取消）。
+                // 副作用（已接受）：选中态是长期状态，期间前台是外部应用/桌面时的 Esc 都会被吞，
+                // 用户点空白即取消、Esc 立即恢复透传。ShouldCancelSelectionOnEscape 已排除编辑态
+                // （编辑中的 Esc 须留给贴图 TextBox 的 PreviewKeyDown 取消编辑）与本进程前台窗口
+                // （命令面板/剪贴板历史/截图遮罩/框选遮罩等的 Esc 交给其自身窗口级处理）。
+                if (isKeyDown && vk == VK_ESCAPE && !active && ShouldCancelSelectionOnEscape?.Invoke() == true)
+                {
+                    CancelSelection?.Invoke();
+                    return (IntPtr)1; // 吞掉，避免 Esc 落入前台应用
                 }
 
                 if (isKeyUp && (vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU) && active)

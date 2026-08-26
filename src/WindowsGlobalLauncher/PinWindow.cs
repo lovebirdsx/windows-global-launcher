@@ -34,6 +34,16 @@ namespace CommandLauncher
     /// </remarks>
     public sealed class PinWindow : Window
     {
+        // ---- Win32 P/Invoke（点击空白/Esc 取消选中：WindowFromPoint/GetForegroundWindow 取窗口，GetWindowThreadProcessId 判进程归属）----
+        [DllImport("user32.dll")]
+        private static extern IntPtr WindowFromPoint(System.Drawing.Point point);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
         // ---- 已打开贴图的静态跟踪（仅 UI 线程访问）：构造加入、Closed 移除 ----
         private static readonly List<PinWindow> _open = new();
 
@@ -45,9 +55,17 @@ namespace CommandLauncher
         private static readonly List<PinWindow> _selected = new();
         // 框选遮罩是否已打开（防重入）
         private static bool _boxSelecting;
-        // 选中描边：亮白（8 分类色无一为白，绝不混淆）+ 加粗到 2
+        // 全局鼠标钩子（懒加载常驻）：框选选中态下监听「点击空白取消选中」，见 GlobalMouseHook
+        private static GlobalMouseHook? _globalMouseHook;
+        // 选中描边：加粗到 2。颜色继承归属色——图片贴图亮白、文本便签继承分类色（见 ApplySelectedVisual，
+        // 不再统一白色，让选中描边与内容归属一眼对应）
         private static readonly Brush SelectedBorderBrush = Freeze(new SolidColorBrush(Colors.White));
         private const double SelectedBorderThickness = 2.0;
+        private const double NormalBorderThickness = 1.0;
+        // 选中时边框「向外」加粗：Border 边框向内绘制，厚度 1→2 会把内容区向内压 1 DIP、改变文本折行。
+        // 故选中时 Margin 缩进同步减 1（16→15），使内容区位置 = Margin + BorderThickness 保持 17 不变，
+        // 边框向外扩 1 DIP、不挤压内容。
+        private static readonly Thickness SelectedBorderMargin = new(ShadowMarginDip - (SelectedBorderThickness - NormalBorderThickness));
 
         // 描边画刷：常态白色半透明（冻结以便跨实例复用）。悬停表达改用阴影浮起（PinHoverShadow），
         // 不再变蓝描边——蓝色描边与「蓝」便签分类描边同色、无法区分；HoverBorderBrush 保留给编辑态提示用
@@ -496,6 +514,8 @@ namespace CommandLauncher
                 return;
             }
             _boxSelecting = true;
+            // 进入框选流程即确保全局鼠标钩子就绪（懒加载一次）：选中态下「点击空白取消选中」依赖它
+            EnsureGlobalMouseHook();
             try
             {
                 var overlay = new PinSelectOverlayWindow();
@@ -538,18 +558,98 @@ namespace CommandLauncher
             _selected.Clear();
         }
 
-        // 选中视觉：描边亮白 + 厚度 2（与常态/分类描边视觉上明确区分）
-        private void ApplySelectedVisual()
+        /// <summary>是否有框选选中的贴图（供全局鼠标/键盘钩子查询，仅 UI 线程）。</summary>
+        internal static bool IsAnySelected => _selected.Count > 0;
+
+        /// <summary>是否有贴图处于文本编辑态（全局 Esc 需排除，避免吞掉编辑态的「取消编辑」）。</summary>
+        internal static bool IsAnyEditing => _open.Any(p => p._isEditing);
+
+        /// <summary>
+        /// 前台窗口是否属于本进程（全局 Esc 需排除，避免吞掉本进程其它窗口——命令面板/剪贴板历史/
+        /// 截图遮罩/框选遮罩/贴图等的 Esc，让它们走各自的窗口级 Esc 处理；贴图自身 OnKeyDown 已会
+        /// 「有选中 → 取消选中」，语义不变）。
+        /// </summary>
+        internal static bool IsForegroundOwnedByThisProcess()
         {
-            _border.BorderBrush = SelectedBorderBrush;
-            _border.BorderThickness = new Thickness(SelectedBorderThickness);
+            var fg = GetForegroundWindow();
+            if (fg == IntPtr.Zero)
+                return false;
+            GetWindowThreadProcessId(fg, out uint pid);
+            return pid == (uint)Environment.ProcessId;
         }
 
-        // 还原常态描边：图片 → NormalBorderBrush，文本 → 分类描边；厚度回 1
+        /// <summary>懒加载安装全局鼠标钩子（仅 UI 线程；第一次框选时调用，之后常驻）。</summary>
+        private static void EnsureGlobalMouseHook()
+        {
+            if (_globalMouseHook == null)
+            {
+                _globalMouseHook = new GlobalMouseHook();
+                _globalMouseHook.Install();
+            }
+        }
+
+        /// <summary>全局 Esc 取消选中（KeyboardHook 回调经 Dispatcher.BeginInvoke 调用，仅 UI 线程）。</summary>
+        internal static void CancelSelectionFromGlobal()
+        {
+            ClearSelection();
+            Logger.LogInfo("按 Esc 取消框选选中");
+        }
+
+        /// <summary>
+        /// 全局左键按下（GlobalMouseHook 回调，仅 UI 线程）：框选选中态下点击**非本进程**窗口
+        /// （桌面/外部应用 = 空白）即取消选中；点击本进程窗口（贴图内容、右键菜单、框选遮罩等）
+        /// 则放行，交给其自身处理。用「进程归属」而非「贴图枚举命中」判定空白，避免把本进程的
+        /// 右键菜单误判为空白而破坏「批量复制选中文本」（CopySelectedTextsToClipboard 依赖 _selected）。
+        /// </summary>
+        internal static void OnGlobalLeftButtonDown(System.Drawing.Point pt)
+        {
+            var hwnd = WindowFromPoint(pt);
+            if (hwnd == IntPtr.Zero)
+                return;
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            if (pid == (uint)Environment.ProcessId)
+                return; // 本进程窗口：交给其自身处理
+            ClearSelection();
+            Logger.LogInfo("点击空白处取消框选选中");
+        }
+
+        /// <summary>单选「仅自己」（单击任意贴图时调用，仅 UI 线程；已单选则幂等）。</summary>
+        private void SelectOnly()
+        {
+            if (_selected.Count == 1 && ReferenceEquals(_selected[0], this))
+                return;
+            ClearSelection();
+            _selected.Add(this);
+            ApplySelectedVisual();
+            Logger.LogInfo("单击贴图，改为单选");
+        }
+
+        // 选中视觉：描边加粗到 2，颜色继承各自归属色——图片贴图用亮白（在任意图片上醒目），
+        // 文本便签用其分类色（8 分类色即身份色，选中后仍一眼对应归属，不再统一白色）。
+        // 加粗时同步减小 Margin（向外扩），内容区位置不变、不挤压文本折行。
+        private void ApplySelectedVisual()
+        {
+            _border.BorderBrush = _mode == ContentMode.Image ? SelectedBorderBrush : CategoryBrush(_category);
+            _border.BorderThickness = new Thickness(SelectedBorderThickness);
+            _border.Margin = SelectedBorderMargin;
+        }
+
+        // 还原常态描边：图片 → NormalBorderBrush，文本 → 分类描边；厚度回 1、Margin 回常态缩进
+        // （选中加粗时 Margin 曾减 1 向外扩，这里一并恢复）。
+        // 编辑态守卫：编辑中的贴图可能仍留在 _selected（先单选再 F2 编辑），此时被
+        // ClearSelection 还原描边会把编辑蓝描边抹成分类色——编辑中保持蓝描边直接返回。
         private void ApplyDefaultBorder()
         {
+            if (_isEditing)
+            {
+                _border.BorderBrush = HoverBorderBrush;
+                _border.BorderThickness = new Thickness(NormalBorderThickness);
+                _border.Margin = new Thickness(ShadowMarginDip);
+                return;
+            }
             _border.BorderBrush = _mode == ContentMode.Image ? NormalBorderBrush : CategoryBrush(_category);
-            _border.BorderThickness = new Thickness(1);
+            _border.BorderThickness = new Thickness(NormalBorderThickness);
+            _border.Margin = new Thickness(ShadowMarginDip);
         }
 
         // 供框选命中测试枚举（internal）：隐藏中（IsVisible==false）与编辑中（_isEditing）的贴图不参与
@@ -1040,11 +1140,19 @@ namespace CommandLauncher
             }
         }
 
-        // 真正的左键释放 —— 唯一可信的「用户松手」信号，无条件标记（不看 _dragPending）
+        // 真正的左键释放 —— 唯一可信的「用户松手」信号，无条件标记（不看 _dragPending）。
+        // 单击（按下且未越过拖动阈值、非双击）→ 单选被点击的贴图（任何时刻点击即选中，不要求先框选）；
+        // 拖动整体移动时 _dragging 为 true、wasClick=false，不受影响；双击关闭已在
+        // OnMouseLeftButtonDown 提前 return，此处 _dragPending 为 false。
+        // 已知副作用（已接受）：双击关闭贴图时，首击会先单选、次击才关闭，净效果是其余成员失去选中——
+        // 属「单击单选 + 双击关闭」组合语义的自然结果（首击无法预知次击会来）。
         private void OnMouseLeftButtonUpDrag(object sender, MouseButtonEventArgs e)
         {
             _sawReleaseSincePress = true;
+            bool wasClick = _dragPending && !_dragging;
             EndDrag();
+            if (wasClick)
+                SelectOnly();
         }
 
         // 结束拖动并归还捕获。**刻意不在这里置 _sawReleaseSincePress**：本方法也挂在
@@ -1179,8 +1287,8 @@ namespace CommandLauncher
             }
             ApplyTextSize();
             _textScroll!.Content = _textBlock;
-            // 描边按选中态恢复：被框选选中的便签落定后仍显示选中视觉（白描边 + 厚 2），
-            // 否则回常态（分类描边 + 厚 1）——直接设分类色会把选中视觉的厚度一并弄丢
+            // 描边按选中态恢复：被选中的便签落定后仍显示选中视觉（分类色描边 + 厚 2），
+            // 否则回常态（分类描边 + 厚 1）——两者现在同为分类色、仅厚度区分，直接设常态会丢掉选中厚度
             if (_selected.Contains(this))
                 ApplySelectedVisual();
             else
