@@ -81,6 +81,7 @@ namespace CommandLauncher
         private const int VK_CONTROL = 0x11;
         private const int VK_MENU = 0x12;   // Alt
         private const int VK_ESCAPE = 0x1B;
+        private const int VK_DELETE = 0x2E;
         private const int VK_UP = 0x26;
         private const int VK_DOWN = 0x28;
         private const int VK_LEFT = 0x25;
@@ -123,6 +124,12 @@ namespace CommandLauncher
 
         /// <summary>取消框选选中（由订阅方在 UI 线程安全执行，须轻量）。</summary>
         public Action? CancelSelection { get; set; }
+
+        /// <summary>由 PinWindow 提供：当前是否需要在框选选中态下用全局 Del 删除选中贴图（非切换器激活时）。</summary>
+        public Func<bool>? ShouldDeleteSelection { get; set; }
+
+        /// <summary>删除框选选中的贴图（由订阅方在 UI 线程安全执行，须轻量）。</summary>
+        public Action? DeleteSelection { get; set; }
 
         // 可配置的「热键 → 动作」绑定表（整体替换，仅在 UI 线程读写，与钩子回调同线程，无需加锁）
         private IReadOnlyList<HotKeyActionBinding> _actionBindings = [];
@@ -233,6 +240,23 @@ namespace CommandLauncher
                 {
                     CancelSelection?.Invoke();
                     return (IntPtr)1; // 吞掉，避免 Esc 落入前台应用
+                }
+
+                // 框选选中态下、切换器未激活时的全局 Del：删除选中的贴图/文字便签（含多选）。
+                // 仅裸 Del 触发（Ctrl/Alt/Shift/Win 全不按）——Shift+Del 在资源管理器是「永久删除」、
+                // Ctrl+Del 等是常见应用内组合键，绝不能吞。副作用与全局 Esc 取消选中同款（已接受）：
+                // 选中态是长期状态，期间前台是外部应用/桌面时的裸 Del 会被吞、变成删除贴图；但任何
+                // 左键点击外部应用即清空选中（全局鼠标钩子既有行为），实际风险窗口极窄；按住 Del 的
+                // 键盘自动重复在第一次按下后守卫即随选中清空变 false、后续重复透传给前台。
+                // ShouldDeleteSelection 已排除编辑态（编辑中的 Del 是 TextBox 删字）与本进程前台窗口
+                // （单击选中贴图后贴图自身是活动窗口，Del 由窗口级 OnKeyDown 处理，语义不变）。
+                if (isKeyDown && vk == VK_DELETE && !active
+                    && !IsKeyPressed(VK_CONTROL) && !IsKeyPressed(VK_MENU) && !IsKeyPressed(VK_SHIFT)
+                    && !IsKeyPressed(VK_LWIN) && !IsKeyPressed(VK_RWIN)
+                    && ShouldDeleteSelection?.Invoke() == true)
+                {
+                    DeleteSelection?.Invoke();
+                    return (IntPtr)1; // 吞掉，避免 Del 落入前台应用
                 }
 
                 if (isKeyUp && (vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU) && active)

@@ -75,6 +75,10 @@ namespace CommandLauncher
             // 等本进程窗口自己的 Esc；贴图自身 OnKeyDown 已会「有选中 → 取消选中」，语义不变。
             _hook.ShouldCancelSelectionOnEscape = () => PinWindow.IsAnySelected && !PinWindow.IsAnyEditing && !PinWindow.IsForegroundOwnedByThisProcess();
             _hook.CancelSelection = () => Dispatcher.BeginInvoke(PinWindow.CancelSelectionFromGlobal);
+            // 框选选中态下的全局 Del 删除选中贴图（含多选）：守卫与 Esc 取消选中完全一致，
+            // 「无修饰键」由钩子侧检查（裸 Del 才触发，Shift+Del 永久删除等组合键绝不吞）。
+            _hook.ShouldDeleteSelection = () => PinWindow.IsAnySelected && !PinWindow.IsAnyEditing && !PinWindow.IsForegroundOwnedByThisProcess();
+            _hook.DeleteSelection = () => Dispatcher.BeginInvoke(PinWindow.CloseSelected);
             _hook.Install();
 
             // 装配可配置的窗口动作热键（如 Alt+Q 关闭前台窗口），并跟随配置热更新

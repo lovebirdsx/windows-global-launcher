@@ -595,6 +595,20 @@ namespace CommandLauncher
             Logger.LogInfo("按 Esc 取消框选选中");
         }
 
+        /// <summary>全局 Del 删除选中的贴图/文字便签（KeyboardHook 回调经 Dispatcher.BeginInvoke 调用，仅 UI 线程）。
+        /// 逐个 Close：_selected/_open 的移除与持久化全由各窗口既有 Closed 回调自动完成（副本遍历防集合修改，
+        /// 同 CloseAll 先例）。不调 ClearSelection——描边还原在窗口即将销毁时无意义。按住 Del 的自动重复不会
+        /// 重复执行：本方法经 BeginInvoke 排队、先于后续重复键执行，Close 投递的 WM_CLOSE（posted 消息）先于
+        /// 输入消息被取出，Closed 回调随之清空 _selected、守卫变 false，后续重复裸 Del 透传给前台应用
+        /// （小副作用，与 Esc 透传同款取舍，见 KeyboardHook 分支注释）。</summary>
+        internal static void CloseSelected()
+        {
+            var count = _selected.Count;
+            foreach (var w in _selected.ToArray())
+                w.Close();
+            Logger.LogInfo($"按 Del 删除选中贴图 {count} 个");
+        }
+
         /// <summary>
         /// 全局左键按下（GlobalMouseHook 回调，仅 UI 线程）：框选选中态下点击**非本进程**窗口
         /// （桌面/外部应用 = 空白）即取消选中；点击本进程窗口（贴图内容、右键菜单、框选遮罩等）
@@ -1218,6 +1232,16 @@ namespace CommandLauncher
             {
                 EnterEditMode();
                 e.Handled = true;
+            }
+            // Del 删除选中的贴图/便签（含多选）。覆盖「单击贴图后贴图自身是活动窗口」的场景——此时
+            // 前台是本进程，全局钩子的 Del 分支守卫主动让位、不重复触发。同样要求无修饰键，与全局
+            // 钩子口径一致（Shift+Del 永久删除等组合键不触发，防误删）。仅在有选中时响应（无选中放行
+            // 不标 Handled——Del 不做「无选中关闭」的对偶语义，避免新增易误触的关闭手势）；
+            // 编辑态防御同 Esc 分支（编辑中的 Del 是 TextBox 删字，已 Handled 不会到达此处）。
+            else if (e.Key == Key.Delete && Keyboard.Modifiers == ModifierKeys.None && !_isEditing && _selected.Count > 0)
+            {
+                e.Handled = true;
+                CloseSelected();
             }
         }
 
