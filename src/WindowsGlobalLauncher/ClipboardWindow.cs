@@ -199,7 +199,10 @@ namespace CommandLauncher
             _searchBox.TextChanged += (s, e) =>
             {
                 _placeholder.Visibility = string.IsNullOrEmpty(_searchBox.Text) ? Visibility.Visible : Visibility.Hidden;
-                RefreshList();
+                // 列表刷新只对可见态有意义：输入只发生在可见时；HideWindow 清空搜索框（隐藏态）
+                // 只需更新占位提示，全量刷新留给下次唤出的 RefreshList(resetSelection: true)
+                if (IsVisible)
+                    RefreshList();
             };
             _searchBox.PreviewKeyDown += SearchBox_PreviewKeyDown;
 
@@ -316,16 +319,23 @@ namespace CommandLauncher
             // 必须在 Show 之前记录，Show 之后前台就是我们自己了
             _previousForeground = GetForegroundWindow();
 
-            _searchBox.Text = ""; // 触发 TextChanged → RefreshList
-            RefreshList();
+            _searchBox.Text = "";
+
             PositionWindow();
 
             Show(); // ShowActivated=false，仅显示不激活；激活统一交给 TryActivateOnce（前台解锁 + 重试）
+            Logger.LogInfo($"剪贴板窗口唤出，弹出前前台窗口: {_previousForeground}");
+
+            // 唤出时选中重置回第一条并滚到顶部（同命令启动器 ShowWindow 的惯例）；
+            // 放在 Show 之后做选择是启动器已验证的时序，可见态增量刷新仍走保留索引语义
+            RefreshList(resetSelection: true);
+
+            // 宽限期从刷新完成后起算：首次唤出可能同步解码缩略图，若从 Show 起算，
+            // 激活抖动保护会被刷新耗时吃掉，复发「唤出一闪即隐」
             _graceUntil = Environment.TickCount64 + ActivationGraceMs;
             _activationRetries = 0;
-            Logger.LogInfo($"剪贴板窗口唤出，弹出前前台窗口: {_previousForeground}");
             TryActivateOnce();
-            UpdatePreview(); // RefreshList 发生在 Show 之前，SelectionChanged 时被 IsVisible 挡住，这里补一次
+            UpdatePreview(); // SelectionChanged 此时已在可见态自然触发，末尾调用仅作幂等兜底
         }
 
         // 热键经低级键盘钩子到达，输入并未真正进入本进程的消息队列，
@@ -473,9 +483,14 @@ namespace CommandLauncher
                 _previewWindow.Show();
         }
 
-        private void RefreshList()
+        /// <summary>
+        /// 刷新列表。resetSelection=true 表示「隐藏→显示」的唤出路径：选中重置回第一条并滚到顶部
+        /// （与命令启动器 ShowWindow 的 ScrollCommandListToTop 惯例一致）；默认保留当前选中索引，
+        /// 供可见态增量刷新使用（Delete 删除后选中下一条等体验依赖该语义）。
+        /// </summary>
+        private void RefreshList(bool resetSelection = false)
         {
-            int previousIndex = Math.Max(_list.SelectedIndex, 0);
+            int previousIndex = resetSelection ? 0 : Math.Max(_list.SelectedIndex, 0);
 
             _items.Clear();
             foreach (var entry in ClipboardHistoryManager.Instance.Query(_searchBox.Text))
