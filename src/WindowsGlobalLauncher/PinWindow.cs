@@ -1014,6 +1014,27 @@ namespace CommandLauncher
         private static double SnapUpToPixel(double dip, double scale)
             => scale > 0 ? Math.Ceiling(dip * scale) / scale : Math.Ceiling(dip);
 
+        // 双击关闭前把内容备份回剪贴板（非破坏性关闭）：误关后 F7/Ctrl+V/剪贴板历史均可找回。
+        // 写回会触发本程序剪贴板监听，经去重置顶刷新而非新增条目。只覆盖双击路径——
+        // Esc/右键菜单/删除/关闭所有是明确意图，不备份、也不覆盖用户剪贴板里刚复制的内容。
+        // 备份是 best-effort：任何失败都不得阻断关闭（复制工具只捕 ExternalException，
+        // 罕见异常在此兜住记 WARN 后继续，双击关闭照常执行）。
+        private void BackupContentToClipboardBeforeClose()
+        {
+            try
+            {
+                bool ok = _mode == ContentMode.Image
+                    ? CopyImageToClipboard() // 复用右键菜单同款「ExternalException 重试 3 次 × 50ms」逻辑
+                    : SetTextWithRetry(_text, "贴图文本备份到剪贴板失败（重试 3 次仍被占用）");
+                if (ok)
+                    Logger.LogInfo("双击关闭前已将内容备份到剪贴板");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"双击关闭前备份内容到剪贴板失败，忽略并继续关闭：{ex.Message}");
+            }
+        }
+
         // 左键按下：双击关闭，单击开始拖动。三处刻意的反直觉做法，改动前请先读完：
         //
         // ① 双击判定**不能用 e.ClickCount**。贴图是 ShowActivated=false 弹出的，刚钉出来时是
@@ -1072,6 +1093,7 @@ namespace CommandLauncher
 
             if (isDoubleClick)
             {
+                BackupContentToClipboardBeforeClose();
                 Logger.LogInfo($"贴图双击关闭（两次按下间隔 {elapsed}ms）");
                 Close();
                 return;
@@ -1425,7 +1447,7 @@ namespace CommandLauncher
             var menu = new ContextMenu();
             if (_mode == ContentMode.Image)
             {
-                menu.Items.Add(CreateMenuItem("复制图像", CopyImageToClipboard));
+                menu.Items.Add(CreateMenuItem("复制图像", () => CopyImageToClipboard())); // 方法组不允许丢弃返回值，须 lambda 包装
                 menu.Items.Add(CreateMenuItem("保存为文件…", SaveToFile));
                 menu.Items.Add(CreateMenuItem("缩放 100%", ResetZoom));
             }
@@ -1475,15 +1497,16 @@ namespace CommandLauncher
             Logger.LogInfo($"文本贴图分类已设为：{name}");
         }
 
-        // 复制图像回剪贴板：剪贴板被占用会抛 ExternalException，重试 3 次、每次间隔 50ms
-        private void CopyImageToClipboard()
+        // 复制图像回剪贴板：剪贴板被占用会抛 ExternalException，重试 3 次、每次间隔 50ms。
+        // 返回是否成功；右键菜单经 lambda 包装调用、返回值被丢弃（方法组不允许丢弃返回值）
+        private bool CopyImageToClipboard()
         {
             for (int attempt = 0; attempt < 3; attempt++)
             {
                 try
                 {
                     Clipboard.SetImage(_source!);
-                    return;
+                    return true;
                 }
                 catch (ExternalException)
                 {
@@ -1491,6 +1514,7 @@ namespace CommandLauncher
                 }
             }
             Logger.LogWarning("贴图复制到剪贴板失败（重试 3 次仍被占用）");
+            return false;
         }
 
         // 复制文本回剪贴板：框选选中多个文本便签时，改为复制所有选中便签的文本（按屏幕位置排序、
@@ -1525,15 +1549,16 @@ namespace CommandLauncher
             Logger.LogInfo($"已复制 {texts.Count} 个文本便签的文本到剪贴板");
         }
 
-        // 写文本到剪贴板：ExternalException 重试 3 次、每次间隔 50ms（同 CopyImageToClipboard 口径）
-        private static void SetTextWithRetry(string text, string failMessage)
+        // 写文本到剪贴板：ExternalException 重试 3 次、每次间隔 50ms（同 CopyImageToClipboard 口径）。
+        // 返回是否成功（调用方忽略返回值即维持原语义）
+        private static bool SetTextWithRetry(string text, string failMessage)
         {
             for (int attempt = 0; attempt < 3; attempt++)
             {
                 try
                 {
                     Clipboard.SetText(text);
-                    return;
+                    return true;
                 }
                 catch (ExternalException)
                 {
@@ -1541,6 +1566,7 @@ namespace CommandLauncher
                 }
             }
             Logger.LogWarning(failMessage);
+            return false;
         }
 
         private void SaveToFile()
