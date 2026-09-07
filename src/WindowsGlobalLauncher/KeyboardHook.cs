@@ -174,6 +174,13 @@ namespace CommandLauncher
                 bool isKeyUp = msg == WM_KEYUP || msg == WM_SYSKEYUP;
                 bool active = IsSwitcherActive?.Invoke() == true;
 
+                // 本程序自身注入的按键（模拟粘贴、媒体键、Shift+F10、Alt 解锁、掩码键等）直接透传、
+                // 不参与任何判定：注入序列若参与绑定匹配会命中用户自定义绑定造成递归/误触发
+                // （如注入的 Shift+F10 命中用户自定义的 Shift+F10 绑定），注入的 Alt up 还会被
+                // 误判为真实松开 Alt、提前 Commit 切换器（切换器激活态按 Ctrl+Alt+Enter 触发右键菜单时）。
+                if ((data.flags & 0x10u) != 0) // LLKHF_INJECTED
+                    return CallNextHookEx(_hookId, nCode, wParam, lParam);
+
                 if (isKeyDown && vk == VK_TAB && IsKeyPressed(VK_MENU))
                 {
                     bool shift = IsKeyPressed(VK_SHIFT);

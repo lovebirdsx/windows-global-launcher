@@ -17,9 +17,16 @@ namespace CommandLauncher
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
         private const byte VK_VOLUME_MUTE = 0xAD;
         private const byte VK_VOLUME_DOWN = 0xAE;
         private const byte VK_VOLUME_UP = 0xAF;
+        private const byte VK_SHIFT = 0x10;
+        private const byte VK_F10 = 0x79;
+        private const byte VK_CONTROL = 0x11;
+        private const byte VK_MENU = 0x12;
         private const uint KEYEVENTF_KEYUP = 0x0002;
 
         /// <summary>全部可用动作（动作名不区分大小写）。</summary>
@@ -35,6 +42,7 @@ namespace CommandLauncher
                 ["PinClipboard"] = ScreenshotManager.PinFromClipboard,
                 ["TogglePinVisibility"] = PinWindow.ToggleAllVisibility, // 切换所有贴图（图片贴图与文字便签）的显示/隐藏
                 ["PinBoxSelect"] = PinWindow.StartBoxSelect, // 框选多个贴图后整体移动（橡皮筋框选，Esc 取消选中）
+                ["ShowContextMenu"] = ShowContextMenu, // 模拟 Shift+F10：向当前焦点控件弹出右键菜单
             };
 
         /// <summary>
@@ -53,6 +61,28 @@ namespace CommandLauncher
         {
             keybd_event(vk, 0, 0, UIntPtr.Zero);
             keybd_event(vk, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        }
+
+        /// <summary>
+        /// 模拟 Shift+F10：向当前焦点控件弹出右键菜单（键盘路径，与真实按键等价）。
+        /// 钩子吞掉组合键时真实 Ctrl/Alt 可能仍按着，先释放它们，否则应用收到的是
+        /// Ctrl+Alt+Shift+F10、加速键表不匹配导致菜单弹不出来。
+        /// </summary>
+        private static void ShowContextMenu()
+        {
+            ReleaseIfPressed(VK_CONTROL);
+            ReleaseIfPressed(VK_MENU);
+            keybd_event(VK_SHIFT, 0, 0, UIntPtr.Zero);
+            keybd_event(VK_F10, 0, 0, UIntPtr.Zero);
+            keybd_event(VK_F10, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        }
+
+        /// <summary>修饰键仍处于按下状态时注入一次 KEYUP 释放（真实按键之后松开产生的多余 KEYUP 无害）。</summary>
+        private static void ReleaseIfPressed(byte vk)
+        {
+            if ((GetAsyncKeyState(vk) & 0x8000) != 0)
+                keybd_event(vk, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
     }
 }

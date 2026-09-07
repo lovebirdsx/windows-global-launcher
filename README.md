@@ -84,17 +84,18 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 
 全局生效的热键，在配置文件的 `WindowActions` 段自定义，修改配置后自动热更新。默认绑定：
 
-| 热键         | 动作                   | 说明                                                                             |
-| ------------ | ---------------------- | -------------------------------------------------------------------------------- |
-| `Alt+Q`      | `CloseWindow`          | 关闭当前前台窗口（等同 `Alt+F4`）                                                |
-| `Win+F12`    | `VolumeUp`             | 增大系统音量                                                                     |
-| `Win+F11`    | `VolumeDown`           | 减小系统音量                                                                     |
-| `Win+F10`    | `ToggleMute`           | 切换系统静音                                                                     |
-| `Ctrl+Alt+C` | `ShowClipboardHistory` | 弹出剪贴板历史                                                                   |
-| `F4`         | `Screenshot`           | 区域截图                                                                         |
-| `F7`         | `PinClipboard`         | 把剪贴板内容钉为屏幕贴图（图片优先，无图片有文字则钉为便签）                     |
-| `Shift+F7`   | `TogglePinVisibility`  | 隐藏/显示所有贴图（图片贴图与文字便签）                                          |
-| `Win+Q`      | `PinBoxSelect`         | 框选多张贴图后整体移动（拖橡皮筋框选，拖动任一选中贴图整体移动；点击空白/`Esc` 取消选中，点击单个贴图改为只选中它，`Del` 删除选中贴图） |
+| 热键             | 动作                   | 说明                                                                             |
+| ---------------- | ---------------------- | -------------------------------------------------------------------------------- |
+| `Alt+Q`          | `CloseWindow`          | 关闭当前前台窗口（等同 `Alt+F4`）                                                |
+| `Win+F12`        | `VolumeUp`             | 增大系统音量                                                                     |
+| `Win+F11`        | `VolumeDown`           | 减小系统音量                                                                     |
+| `Win+F10`        | `ToggleMute`           | 切换系统静音                                                                     |
+| `Ctrl+Alt+C`     | `ShowClipboardHistory` | 弹出剪贴板历史                                                                   |
+| `F4`             | `Screenshot`           | 区域截图                                                                         |
+| `F7`             | `PinClipboard`         | 把剪贴板内容钉为屏幕贴图（图片优先，无图片有文字则钉为便签）                     |
+| `Shift+F7`       | `TogglePinVisibility`  | 隐藏/显示所有贴图（图片贴图与文字便签）                                          |
+| `Win+Q`          | `PinBoxSelect`         | 框选多张贴图后整体移动（拖橡皮筋框选，拖动任一选中贴图整体移动；点击空白/`Esc` 取消选中，点击单个贴图改为只选中它，`Del` 删除选中贴图） |
+| `Ctrl+Alt+Enter` | `ShowContextMenu`      | 模拟 `Shift+F10` 弹出右键菜单                                                    |
 
 ## 安装
 
@@ -153,7 +154,8 @@ Get-FileHash WindowsGlobalLauncher-vX.Y.Z-win-x64.zip -Algorithm SHA256
     { "Action": "Screenshot", "HotKey": "F4", "Enabled": true },
     { "Action": "PinClipboard", "HotKey": "F7", "Enabled": true },
     { "Action": "TogglePinVisibility", "HotKey": "Shift+F7", "Enabled": true },
-    { "Action": "PinBoxSelect", "HotKey": "Win+Q", "Enabled": true }
+    { "Action": "PinBoxSelect", "HotKey": "Win+Q", "Enabled": true },
+    { "Action": "ShowContextMenu", "HotKey": "Ctrl+Alt+Enter", "Enabled": true }
   ],
   "Commands": [
     {
@@ -169,7 +171,7 @@ Get-FileHash WindowsGlobalLauncher-vX.Y.Z-win-x64.zip -Algorithm SHA256
 
 > `RunAsAdmin` 可选,默认 `false`:命令以普通用户权限启动(借用桌面 Shell 令牌降权)。设为 `true` 则保留管理员权限启动。降权失败(如 explorer 未运行)时会报错且不启动该命令。
 
-> `WindowActions` 可选,缺省时补默认绑定。`Action` 当前可用值:`CloseWindow`(关闭前台窗口)、`VolumeUp`/`VolumeDown`(增大/减小系统音量)、`ToggleMute`(切换静音)、`ShowClipboardHistory`(剪贴板历史)、`Screenshot`(区域截图)、`PinClipboard`(把剪贴板内容钉为屏幕贴图：图片优先，无图片有文字则钉为便签)、`TogglePinVisibility`(隐藏/显示所有贴图)、`PinBoxSelect`(框选贴图整体移动);`Enabled` 设为 `false` 可临时停用某条绑定。修饰键为精确匹配(如配置 `Alt+Q` 时 `Alt+Shift+Q` 不会触发)。
+> `WindowActions` 可选,缺省时补默认绑定。`Action` 当前可用值:`CloseWindow`(关闭前台窗口)、`VolumeUp`/`VolumeDown`(增大/减小系统音量)、`ToggleMute`(切换静音)、`ShowClipboardHistory`(剪贴板历史)、`Screenshot`(区域截图)、`PinClipboard`(把剪贴板内容钉为屏幕贴图：图片优先，无图片有文字则钉为便签)、`TogglePinVisibility`(隐藏/显示所有贴图)、`PinBoxSelect`(框选贴图整体移动)、`ShowContextMenu`(模拟 `Shift+F10` 弹出右键菜单);`Enabled` 设为 `false` 可临时停用某条绑定。修饰键为精确匹配(如配置 `Alt+Q` 时 `Alt+Shift+Q` 不会触发)。
 
 ## 开发
 
