@@ -55,6 +55,19 @@ namespace CommandLauncher
                     return;
                 }
 
+                // 提升进程优先级：降低高负载（大型游戏/编译/索引）时 UI 线程被饿死、
+                // Alt+Tab 等低级钩子响应延迟的概率。AboveNormal 是安全档，不会像 High 那样干扰系统调度。
+                try
+                {
+                    System.Diagnostics.Process.GetCurrentProcess().PriorityClass =
+                        System.Diagnostics.ProcessPriorityClass.AboveNormal;
+                    Logger.LogInfo("进程优先级已提升为 AboveNormal");
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning($"提升进程优先级失败（继续以 Normal 运行）: {ex.Message}");
+                }
+
                 var app = new App();
                 Logger.LogInfo("开始运行应用程序");
                 app.Run();

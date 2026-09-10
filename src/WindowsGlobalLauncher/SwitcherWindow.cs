@@ -3,11 +3,13 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace CommandLauncher
 {
@@ -38,8 +40,12 @@ namespace CommandLauncher
         private const double WindowWidth = 560;
         private const double WindowHeight = 800; // 固定高度，不随窗口数量变化
 
-        private readonly ObservableCollection<WindowInfo> _items = [];
+        // 当前选中项对应的窗口句柄（列表项为 WindowEntry 包装，直接选中 WindowInfo 会在后台刷新时丢失引用）
+        private IntPtr _selectedHwnd;
+
+        private readonly ObservableCollection<WindowEntry> _items = [];
         private readonly ListBox _list = CreateList();
+        private readonly AltTabHook _altTabHook = new();
         private readonly KeyboardHook _hook = new();
 
         private uint _shellHookMsg;
@@ -49,6 +55,57 @@ namespace CommandLauncher
         // 仅在 UI 线程（钩子回调线程）读写，无需加锁。
         private bool _isActive;
         private bool _disposed;
+
+        /// <summary>窗口信息包装：后台补全标题/图标时通过 INotifyPropertyChanged 刷新 UI。</summary>
+        private sealed class WindowEntry : System.ComponentModel.INotifyPropertyChanged
+        {
+            public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+
+            public WindowInfo Info { get; }
+
+            public WindowEntry(WindowInfo info) => Info = info;
+
+            public IntPtr Hwnd => Info.Hwnd;
+
+            public string Title
+            {
+                get => Info.Title;
+                set
+                {
+                    if (Info.Title != value)
+                    {
+                        Info.Title = value;
+                        PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(Title)));
+                    }
+                }
+            }
+
+            public System.Windows.Media.ImageSource? Icon
+            {
+                get => Info.Icon;
+                set
+                {
+                    if (!ReferenceEquals(Info.Icon, value))
+                    {
+                        Info.Icon = value;
+                        PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(Icon)));
+                    }
+                }
+            }
+
+            public bool HasNotification
+            {
+                get => Info.HasNotification;
+                set
+                {
+                    if (Info.HasNotification != value)
+                    {
+                        Info.HasNotification = value;
+                        PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(HasNotification)));
+                    }
+                }
+            }
+        }
 
         public SwitcherWindow()
         {
@@ -62,24 +119,24 @@ namespace CommandLauncher
             RegisterShellHookWindow(hwnd);
             HwndSource.FromHwnd(hwnd).AddHook(WndProc);
 
-            _hook.AltTab += OnAltTab;
-            _hook.Commit += OnCommit;
-            _hook.Cancel += OnCancel;
-            _hook.Navigate += OnNavigate;
-            _hook.Close += OnClose;
-            _hook.MoveMonitor += OnMoveMonitor;
-            _hook.IsSwitcherActive = () => _isActive;
-            // 框选选中态下的全局 Esc 取消选中（空白处按 Esc）：查询须在钩子回调线程（UI 线程）轻量，
-            // 实际清空选中等 UI 操作经 Dispatcher.BeginInvoke 异步执行，与动作派发同风格。
-            // 条件额外排除「前台是本进程窗口」——否则会吞掉命令面板/剪贴板历史/截图遮罩/框选遮罩
-            // 等本进程窗口自己的 Esc；贴图自身 OnKeyDown 已会「有选中 → 取消选中」，语义不变。
-            _hook.ShouldCancelSelectionOnEscape = () => PinWindow.IsAnySelected && !PinWindow.IsAnyEditing && !PinWindow.IsForegroundOwnedByThisProcess();
+            // Alt+Tab 专用钩子：极短回调路径，只做 Alt/Tab/Esc 判定
+            _altTabHook.AltTab += OnAltTab;
+            _altTabHook.Commit += OnCommit;
+            _altTabHook.Cancel += OnCancel;
+            _altTabHook.Navigate += OnNavigate;
+            _altTabHook.Close += OnClose;
+            _altTabHook.MoveMonitor += OnMoveMonitor;
+            _altTabHook.IsSwitcherActive = () => _isActive;
+            _altTabHook.Install();
+
+            // 通用键盘钩子：可配置窗口动作热键 + 框选选中态的全局 Esc/Del
+            // 条件安装：当前有动作绑定或选中态守卫时才会真正装钩子
+            // 守卫必须排除切换器激活态（!_isActive）：否则切换器激活时按 Esc 会先被
+            // KeyboardHook 吞掉并清空贴图选中，AltTabHook 收不到 Esc、切换器无法取消。
+            _hook.ShouldCancelSelectionOnEscape = () => !_isActive && PinWindow.IsAnySelected && !PinWindow.IsAnyEditing && !PinWindow.IsForegroundOwnedByThisProcess();
             _hook.CancelSelection = () => Dispatcher.BeginInvoke(PinWindow.CancelSelectionFromGlobal);
-            // 框选选中态下的全局 Del 删除选中贴图（含多选）：守卫与 Esc 取消选中完全一致，
-            // 「无修饰键」由钩子侧检查（裸 Del 才触发，Shift+Del 永久删除等组合键绝不吞）。
-            _hook.ShouldDeleteSelection = () => PinWindow.IsAnySelected && !PinWindow.IsAnyEditing && !PinWindow.IsForegroundOwnedByThisProcess();
+            _hook.ShouldDeleteSelection = () => !_isActive && PinWindow.IsAnySelected && !PinWindow.IsAnyEditing && !PinWindow.IsForegroundOwnedByThisProcess();
             _hook.DeleteSelection = () => Dispatcher.BeginInvoke(PinWindow.CloseSelected);
-            _hook.Install();
 
             // 装配可配置的窗口动作热键（如 Alt+Q 关闭前台窗口），并跟随配置热更新
             ReloadActionBindings();
@@ -222,26 +279,26 @@ namespace CommandLauncher
             if (!_isActive)
             {
                 _isActive = true;
-                Dispatcher.BeginInvoke(() => ShowSwitcher(reverse));
+                Dispatcher.BeginInvoke(DispatcherPriority.Input, () => ShowSwitcher(reverse));
             }
             else
             {
-                Dispatcher.BeginInvoke(() => MoveSelection(reverse ? -1 : 1));
+                Dispatcher.BeginInvoke(DispatcherPriority.Input, () => MoveSelection(reverse ? -1 : 1));
             }
         }
 
-        private void OnCommit() => Dispatcher.BeginInvoke(Commit);
+        private void OnCommit() => Dispatcher.BeginInvoke(DispatcherPriority.Input, Commit);
 
-        private void OnCancel() => Dispatcher.BeginInvoke(Cancel);
+        private void OnCancel() => Dispatcher.BeginInvoke(DispatcherPriority.Input, Cancel);
 
         private void OnNavigate(int direction)
-            => Dispatcher.BeginInvoke(() => { if (_isActive) MoveSelection(direction); });
+            => Dispatcher.BeginInvoke(DispatcherPriority.Input, () => { if (_isActive) MoveSelection(direction); });
 
         private void OnClose()
-            => Dispatcher.BeginInvoke(() => { if (_isActive) CloseSelected(); });
+            => Dispatcher.BeginInvoke(DispatcherPriority.Input, () => { if (_isActive) CloseSelected(); });
 
         private void OnMoveMonitor(int direction)
-            => Dispatcher.BeginInvoke(() => { if (_isActive) MoveSelected(direction); });
+            => Dispatcher.BeginInvoke(DispatcherPriority.Input, () => { if (_isActive) MoveSelected(direction); });
 
         #endregion
 
@@ -277,30 +334,72 @@ namespace CommandLauncher
             if (!_isActive)
                 return; // 可能已被 Commit/Cancel 复位
 
-            IntPtr self = new WindowInteropHelper(this).Handle;
-            List<WindowInfo> windows = WindowEnumerator.EnumerateWindows(self, _flashingWindows);
+            _generation++; // 新一轮枚举，使上一轮的后台补全失效
 
-            if (windows.Count == 0)
+            IntPtr self = new WindowInteropHelper(this).Handle;
+
+            // 第一阶段：同步枚举顶层窗口句柄（纯句柄操作，通常 <10ms）
+            var hwnds = WindowEnumerator.EnumerateTopLevelHwnds(self);
+            if (hwnds.Count == 0)
             {
                 _isActive = false;
                 return;
             }
 
+            // 立即用占位内容显示窗口（图标/标题后台补齐）
             _items.Clear();
-            foreach (var w in windows)
-                _items.Add(w);
+            foreach (var hwnd in hwnds)
+            {
+                _items.Add(new WindowEntry(new WindowInfo
+                {
+                    Hwnd = hwnd,
+                    Title = "加载中…",
+                    HasNotification = _flashingWindows.Contains(hwnd)
+                }));
+            }
 
-            // 默认选中：正向时选“上一个窗口”（index 1），反向时选末项
             int defaultIndex = reverse
                 ? _items.Count - 1
                 : (_items.Count > 1 ? 1 : 0);
             _list.SelectedIndex = defaultIndex;
+            _selectedHwnd = hwnds[defaultIndex];
             _list.ScrollIntoView(_list.SelectedItem);
 
             CenterOnScreen();
             Show();
             Topmost = true;
+
+            // 第二阶段：后台线程补全标题与图标（WM_GETICON / Process.GetProcessById 可能较慢）
+            int generation = _generation;
+            Task.Run(() =>
+            {
+                var details = new List<(IntPtr Hwnd, string Title, System.Windows.Media.ImageSource? Icon, string ProcessName)>();
+                foreach (var hwnd in hwnds)
+                {
+                    var info = new WindowInfo();
+                    WindowEnumerator.FetchWindowDetails(hwnd, info);
+                    details.Add((hwnd, info.Title, info.Icon, info.ProcessName));
+                }
+
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+                {
+                    // 若切换器已关闭、已开始新一轮枚举，或 Dispatcher 正在关闭，丢弃过期结果
+                    if (generation != _generation || !_isActive || Dispatcher.HasShutdownStarted)
+                        return;
+
+                    foreach (var d in details)
+                    {
+                        var entry = _items.FirstOrDefault(x => x.Hwnd == d.Hwnd);
+                        if (entry == null)
+                            continue;
+                        entry.Title = string.IsNullOrWhiteSpace(d.Title) ? "（无标题）" : d.Title;
+                        entry.Icon = d.Icon;
+                    }
+                });
+            });
         }
+
+        private int _generation; // 每次 ShowSwitcher 递增，用于丢弃过期的后台刷新
 
         private void MoveSelection(int direction)
         {
@@ -310,17 +409,19 @@ namespace CommandLauncher
 
             int idx = (_list.SelectedIndex + direction + n) % n;
             _list.SelectedIndex = idx;
+            if (_list.SelectedItem is WindowEntry entry)
+                _selectedHwnd = entry.Hwnd;
             _list.ScrollIntoView(_list.SelectedItem);
         }
 
         // 关闭当前选中窗口，并保持切换器激活。
         private void CloseSelected()
         {
-            if (!_isActive || !IsVisible || _list.SelectedItem is not WindowInfo target)
+            if (!_isActive || !IsVisible || _list.SelectedItem is not WindowEntry entry)
                 return;
 
             int idx = _list.SelectedIndex;
-            WindowEnumerator.CloseWindow(target.Hwnd);
+            WindowEnumerator.CloseWindow(entry.Hwnd);
 
             // WM_CLOSE 是异步请求，目标窗口此刻通常尚未销毁；直接从列表移除作为即时反馈，
             // 避免立即重新枚举又把它加回来。
@@ -341,12 +442,13 @@ namespace CommandLauncher
             if (!_isActive)
                 return;
             _isActive = false;
+            _generation++; // 让正在后台补全的详情失效
 
-            if (IsVisible && _list.SelectedItem is WindowInfo target)
+            if (IsVisible && _list.SelectedItem is WindowEntry entry)
             {
                 Hide();
-                _flashingWindows.Remove(target.Hwnd);
-                WindowEnumerator.Activate(target.Hwnd);
+                _flashingWindows.Remove(entry.Hwnd);
+                WindowEnumerator.Activate(entry.Hwnd);
             }
             else
             {
@@ -357,14 +459,15 @@ namespace CommandLauncher
         private void Cancel()
         {
             _isActive = false;
+            _generation++; // 让正在后台补全的详情失效
             Hide();
         }
 
         private void MoveSelected(int direction)
         {
-            if (!_isActive || !IsVisible || _list.SelectedItem is not WindowInfo target)
+            if (!_isActive || !IsVisible || _list.SelectedItem is not WindowEntry entry)
                 return;
-            WindowEnumerator.MoveToAdjacentMonitor(target.Hwnd, direction);
+            WindowEnumerator.MoveToAdjacentMonitor(entry.Hwnd, direction);
         }
 
         // 固定窗口大小，仅做居中（高度超出屏幕工作区时按工作区收敛）。
@@ -451,6 +554,7 @@ namespace CommandLauncher
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
             if (hwnd != IntPtr.Zero)
                 DeregisterShellHookWindow(hwnd);
+            _altTabHook.Dispose();
             _hook.Dispose();
             _disposed = true;
             GC.SuppressFinalize(this);

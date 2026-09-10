@@ -26,9 +26,12 @@ namespace CommandLauncher
     }
 
     /// <summary>
-    /// 低级键盘钩子（WH_KEYBOARD_LL），用于接管系统 Alt+Tab。
-    /// 在 WPF UI 线程上安装，钩子回调即运行在 UI 线程；回调本体只做轻量判定，
+    /// 可配置窗口动作热键（WH_KEYBOARD_LL）+ 框选选中态的全局 Esc/Del。
+    /// Alt+Tab 已由 <see cref="AltTabHook"/> 专用钩子接管，本类不再处理。
+    /// 钩子安装在 WPF UI 线程上，回调运行在 UI 线程；回调本体只做轻量判定，
     /// 实际 UI 操作由订阅方通过 Dispatcher.BeginInvoke 异步执行，避免触发系统钩子超时。
+    /// 为缩短钩链、降低系统判定超时（LowLevelHooksTimeout）的概率，本钩子采用条件安装：
+    /// 没有任何动作绑定、且框选选中态守卫未订阅时，不安装钩子。
     /// </summary>
     public class KeyboardHook : IDisposable
     {
@@ -76,57 +79,42 @@ namespace CommandLauncher
         private const int WM_SYSKEYDOWN = 0x0104;
         private const int WM_SYSKEYUP = 0x0105;
 
-        private const int VK_TAB = 0x09;
         private const int VK_SHIFT = 0x10;
         private const int VK_CONTROL = 0x11;
         private const int VK_MENU = 0x12;   // Alt
         private const int VK_ESCAPE = 0x1B;
         private const int VK_DELETE = 0x2E;
-        private const int VK_UP = 0x26;
-        private const int VK_DOWN = 0x28;
-        private const int VK_LEFT = 0x25;
-        private const int VK_RIGHT = 0x27;
-        private const int VK_J = 0x4A;
-        private const int VK_K = 0x4B;
-        private const int VK_N = 0x4E;
-        private const int VK_P = 0x50;
-        private const int VK_X = 0x58;
         private const int VK_LWIN = 0x5B;
         private const int VK_RWIN = 0x5C;
-        private const int VK_LMENU = 0xA4;
-        private const int VK_RMENU = 0xA5;
 
         #endregion
 
-        /// <summary>按下 Alt+Tab（参数为是否同时按住 Shift，表示反向）。</summary>
-        public event Action<bool>? AltTab;
-
-        /// <summary>松开 Alt，确认当前选中窗口。</summary>
-        public event Action? Commit;
-
-        /// <summary>按下 Esc，取消切换。</summary>
-        public event Action? Cancel;
-
-        /// <summary>切换器激活态下用方向键 / j,k,p,n 移动选择（-1 上，+1 下）。</summary>
-        public event Action<int>? Navigate;
-
-        /// <summary>切换器激活态下按 x，关闭当前选中窗口。</summary>
-        public event Action? Close;
-
-        /// <summary>切换器激活态下按左/右方向键，将选中窗口移到相邻显示器（-1 左，+1 右）。</summary>
-        public event Action<int>? MoveMonitor;
-
-        /// <summary>由切换器提供：当前切换器是否处于激活态（决定是否吞掉 Esc / 触发 Commit）。</summary>
-        public Func<bool>? IsSwitcherActive { get; set; }
-
+        private Func<bool>? _shouldCancelSelectionOnEscape;
         /// <summary>由 PinWindow 提供：当前是否需要在框选选中态下用全局 Esc 取消选中（非切换器激活时）。</summary>
-        public Func<bool>? ShouldCancelSelectionOnEscape { get; set; }
+        public Func<bool>? ShouldCancelSelectionOnEscape
+        {
+            get => _shouldCancelSelectionOnEscape;
+            set
+            {
+                _shouldCancelSelectionOnEscape = value;
+                RefreshInstallState();
+            }
+        }
 
         /// <summary>取消框选选中（由订阅方在 UI 线程安全执行，须轻量）。</summary>
         public Action? CancelSelection { get; set; }
 
+        private Func<bool>? _shouldDeleteSelection;
         /// <summary>由 PinWindow 提供：当前是否需要在框选选中态下用全局 Del 删除选中贴图（非切换器激活时）。</summary>
-        public Func<bool>? ShouldDeleteSelection { get; set; }
+        public Func<bool>? ShouldDeleteSelection
+        {
+            get => _shouldDeleteSelection;
+            set
+            {
+                _shouldDeleteSelection = value;
+                RefreshInstallState();
+            }
+        }
 
         /// <summary>删除框选选中的贴图（由订阅方在 UI 线程安全执行，须轻量）。</summary>
         public Action? DeleteSelection { get; set; }
@@ -139,6 +127,7 @@ namespace CommandLauncher
         {
             _actionBindings = bindings ?? [];
             Logger.LogInfo($"动作热键绑定已更新，共 {_actionBindings.Count} 条");
+            RefreshInstallState();
         }
 
         private readonly LowLevelKeyboardProc _proc; // 字段强引用，防止委托被 GC 回收
@@ -162,6 +151,25 @@ namespace CommandLauncher
                 Logger.LogInfo("键盘钩子安装成功");
         }
 
+        /// <summary>条件安装/卸载：有动作绑定或选中态守卫时安装，否则卸载，缩短全局钩链。</summary>
+        private void RefreshInstallState()
+        {
+            bool needHook = _actionBindings.Count > 0
+                || ShouldCancelSelectionOnEscape != null
+                || ShouldDeleteSelection != null;
+
+            if (needHook && _hookId == IntPtr.Zero)
+            {
+                Install();
+            }
+            else if (!needHook && _hookId != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(_hookId);
+                _hookId = IntPtr.Zero;
+                Logger.LogInfo("键盘钩子已卸载（无绑定/守卫，缩短钩链）");
+            }
+        }
+
         private IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
         {
             if (nCode >= 0)
@@ -171,22 +179,11 @@ namespace CommandLauncher
                 int vk = (int)data.vkCode;
 
                 bool isKeyDown = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-                bool isKeyUp = msg == WM_KEYUP || msg == WM_SYSKEYUP;
-                bool active = IsSwitcherActive?.Invoke() == true;
 
                 // 本程序自身注入的按键（模拟粘贴、媒体键、Shift+F10、Alt 解锁、掩码键等）直接透传、
-                // 不参与任何判定：注入序列若参与绑定匹配会命中用户自定义绑定造成递归/误触发
-                // （如注入的 Shift+F10 命中用户自定义的 Shift+F10 绑定），注入的 Alt up 还会被
-                // 误判为真实松开 Alt、提前 Commit 切换器（切换器激活态按 Ctrl+Alt+Enter 触发右键菜单时）。
+                // 不参与任何判定：注入序列若参与绑定匹配会命中用户自定义绑定造成递归/误触发。
                 if ((data.flags & 0x10u) != 0) // LLKHF_INJECTED
                     return CallNextHookEx(_hookId, nCode, wParam, lParam);
-
-                if (isKeyDown && vk == VK_TAB && IsKeyPressed(VK_MENU))
-                {
-                    bool shift = IsKeyPressed(VK_SHIFT);
-                    AltTab?.Invoke(shift);
-                    return (IntPtr)1; // 吞掉，阻止系统原生 Alt+Tab
-                }
 
                 // 可配置的动作热键（如 Alt+Q 关闭前台窗口）：修饰键精确匹配，命中即吞掉
                 if (isKeyDown && _actionBindings.Count > 0)
@@ -208,67 +205,21 @@ namespace CommandLauncher
                     }
                 }
 
-                // 切换器激活态下的键盘导航（方向键 / j,k,p,n / Esc），一律吞掉
-                if (active && isKeyDown)
-                {
-                    switch (vk)
-                    {
-                        case VK_UP:
-                        case VK_K:
-                        case VK_P:
-                            Navigate?.Invoke(-1);
-                            return (IntPtr)1;
-                        case VK_DOWN:
-                        case VK_J:
-                        case VK_N:
-                            Navigate?.Invoke(1);
-                            return (IntPtr)1;
-                        case VK_ESCAPE:
-                            Cancel?.Invoke();
-                            return (IntPtr)1;
-                        case VK_X:
-                            Close?.Invoke();
-                            return (IntPtr)1; // 吞掉，避免 x 落入目标窗口
-                        case VK_LEFT:
-                            MoveMonitor?.Invoke(-1);
-                            return (IntPtr)1;
-                        case VK_RIGHT:
-                            MoveMonitor?.Invoke(1);
-                            return (IntPtr)1;
-                    }
-                }
-
-                // 框选选中态下、切换器未激活时的全局 Esc：取消选中（空白处按 Esc 也能取消）。
-                // 副作用（已接受）：选中态是长期状态，期间前台是外部应用/桌面时的 Esc 都会被吞，
-                // 用户点空白即取消、Esc 立即恢复透传。ShouldCancelSelectionOnEscape 已排除编辑态
-                // （编辑中的 Esc 须留给贴图 TextBox 的 PreviewKeyDown 取消编辑）与本进程前台窗口
-                // （命令面板/剪贴板历史/截图遮罩/框选遮罩等的 Esc 交给其自身窗口级处理）。
-                if (isKeyDown && vk == VK_ESCAPE && !active && ShouldCancelSelectionOnEscape?.Invoke() == true)
+                // 框选选中态下的全局 Esc：取消选中（空白处按 Esc 也能取消）。
+                if (isKeyDown && vk == VK_ESCAPE && ShouldCancelSelectionOnEscape?.Invoke() == true)
                 {
                     CancelSelection?.Invoke();
-                    return (IntPtr)1; // 吞掉，避免 Esc 落入前台应用
+                    return (IntPtr)1;
                 }
 
-                // 框选选中态下、切换器未激活时的全局 Del：删除选中的贴图/文字便签（含多选）。
-                // 仅裸 Del 触发（Ctrl/Alt/Shift/Win 全不按）——Shift+Del 在资源管理器是「永久删除」、
-                // Ctrl+Del 等是常见应用内组合键，绝不能吞。副作用与全局 Esc 取消选中同款（已接受）：
-                // 选中态是长期状态，期间前台是外部应用/桌面时的裸 Del 会被吞、变成删除贴图；但任何
-                // 左键点击外部应用即清空选中（全局鼠标钩子既有行为），实际风险窗口极窄；按住 Del 的
-                // 键盘自动重复在第一次按下后守卫即随选中清空变 false、后续重复透传给前台。
-                // ShouldDeleteSelection 已排除编辑态（编辑中的 Del 是 TextBox 删字）与本进程前台窗口
-                // （单击选中贴图后贴图自身是活动窗口，Del 由窗口级 OnKeyDown 处理，语义不变）。
-                if (isKeyDown && vk == VK_DELETE && !active
+                // 框选选中态下的全局 Del：删除选中的贴图/文字便签（含多选）。仅裸 Del 触发。
+                if (isKeyDown && vk == VK_DELETE
                     && !IsKeyPressed(VK_CONTROL) && !IsKeyPressed(VK_MENU) && !IsKeyPressed(VK_SHIFT)
                     && !IsKeyPressed(VK_LWIN) && !IsKeyPressed(VK_RWIN)
                     && ShouldDeleteSelection?.Invoke() == true)
                 {
                     DeleteSelection?.Invoke();
-                    return (IntPtr)1; // 吞掉，避免 Del 落入前台应用
-                }
-
-                if (isKeyUp && (vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU) && active)
-                {
-                    Commit?.Invoke();
+                    return (IntPtr)1;
                 }
             }
 

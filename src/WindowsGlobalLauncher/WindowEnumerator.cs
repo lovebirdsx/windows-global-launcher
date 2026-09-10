@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -123,8 +124,36 @@ namespace CommandLauncher
 
         #endregion
 
-        // 进程 exe 提取出的图标较昂贵，按 exe 路径缓存
-        private static readonly Dictionary<string, ImageSource?> _exeIconCache = new();
+        // 进程 exe 提取出的图标较昂贵，按 exe 路径缓存；后台线程会并发读写，用 ConcurrentDictionary
+        private static readonly ConcurrentDictionary<string, ImageSource?> _exeIconCache = new();
+
+        /// <summary>
+        /// 枚举所有可参与 Alt+Tab 的顶层窗口句柄，顺序为 Z 序（≈MRU，首项为当前前台窗口）。
+        /// 只做过滤，不取标题/图标/进程名，纯句柄操作，耗时极短（通常 &lt;10ms）。
+        /// </summary>
+        public static List<IntPtr> EnumerateTopLevelHwnds(IntPtr excludeHwnd)
+        {
+            var result = new List<IntPtr>();
+            EnumWindows((hwnd, _) =>
+            {
+                if (IsAltTabWindow(hwnd, excludeHwnd) && GetWindowTextLength(hwnd) > 0)
+                    result.Add(hwnd);
+                return true;
+            }, IntPtr.Zero);
+            return result;
+        }
+
+        /// <summary>
+        /// 为指定窗口句柄补全标题、图标、进程名等详情。
+        /// 包含 WM_GETICON 跨进程消息与 Process.GetProcessById，可能较慢，适合在后台线程调用。
+        /// </summary>
+        public static void FetchWindowDetails(IntPtr hwnd, WindowInfo info)
+        {
+            info.Title = GetTitle(hwnd);
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            info.Icon = GetWindowIcon(hwnd, pid);
+            info.ProcessName = GetProcessName(pid);
+        }
 
         /// <summary>
         /// 枚举所有可参与 Alt+Tab 的顶层窗口，顺序为 Z 序（≈MRU，首项为当前前台窗口）。
