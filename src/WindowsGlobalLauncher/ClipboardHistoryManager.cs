@@ -20,7 +20,7 @@ namespace CommandLauncher
     public class ClipboardHistoryManager : IDisposable
     {
         /// <summary>最多保留的历史条数。</summary>
-        public const int MaxEntries = 100;
+        public const int MaxEntries = 1000;
 
         // 超过该长度的文本不记录（避免复制大文件内容时撑爆历史文件与内存）
         private const int MaxTextLength = 50_000;
@@ -265,7 +265,11 @@ namespace CommandLauncher
             }
         }
 
-        /// <summary>按需加载图片缩略图（缓存在条目上，跨刷新生效）。</summary>
+        /// <summary>
+        /// 按需加载图片缩略图（缓存在条目上，跨刷新生效，不持久化）。
+        /// 由 ClipboardWindow.ThumbnailConverter 在行被实例化 / 容器被复用时调用（UI 线程）。
+        /// 不要改回在 ClipboardWindow.RefreshList 中全量调用——上限 1000 时会在唤出时同步解码上千张图、冻结 UI。
+        /// </summary>
         public void EnsureThumbnail(ClipboardEntry entry)
         {
             if (!entry.IsImage || entry.Thumbnail != null)

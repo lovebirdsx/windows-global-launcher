@@ -94,6 +94,10 @@ namespace CommandLauncher
         // 弹出前的前台窗口，回车后把焦点还给它再模拟 Ctrl+V
         private IntPtr _previousForeground;
 
+        // 上一次预览过的条目：选中切走时释放其原图缓存，保证同一时刻最多只缓存一张预览原图
+        // （长截图按 720px 宽解码后可达几十 MB，浏览上千条图片会累计到 GB 级）
+        private ClipboardEntry? _previewedEntry;
+
         // 显示后的激活宽限期（毫秒）：此间失焦多为激活序列的瞬时抖动（VS Code 短暂夺回前台），
         // 重试激活而非隐藏，避免第一次唤出「一闪即隐」；宽限期过后恢复「失焦即隐藏」。
         private const int ActivationGraceMs = 600;
@@ -243,7 +247,9 @@ namespace CommandLauncher
             thumbnail.SetValue(MarginProperty, new Thickness(0, 0, 10, 0));
             thumbnail.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
             thumbnail.SetValue(Image.StretchProperty, Stretch.Uniform);
-            thumbnail.SetBinding(Image.SourceProperty, new Binding("Thumbnail"));
+            // 缩略图按需解码：绑定源是条目本身，转换器在行被实例化（含虚拟化预取页）时才读盘解码，
+            // 避免在上限 1000 时于 RefreshList 中同步预解码全部图片条目造成唤出冻结
+            thumbnail.SetBinding(Image.SourceProperty, new Binding(".") { Converter = new ThumbnailConverter() });
             thumbnail.SetBinding(VisibilityProperty, new Binding("IsImage") { Converter = new BooleanToVisibilityConverter() });
 
             var time = new FrameworkElementFactory(typeof(TextBlock));
@@ -330,8 +336,9 @@ namespace CommandLauncher
             // 放在 Show 之后做选择是启动器已验证的时序，可见态增量刷新仍走保留索引语义
             RefreshList(resetSelection: true);
 
-            // 宽限期从刷新完成后起算：首次唤出可能同步解码缩略图，若从 Show 起算，
-            // 激活抖动保护会被刷新耗时吃掉，复发「唤出一闪即隐」
+            // 宽限期从刷新完成后起算：RefreshList 重建列表（上限 1000 时约数毫秒）以及紧随其后的
+            // 布局阶段（缩略图正是在此时才按需解码）都在本方法返回后继续，若从 Show 起算，
+            // 激活抖动保护会被这段耗时吃掉，复发「唤出一闪即隐」
             _graceUntil = Environment.TickCount64 + ActivationGraceMs;
             _activationRetries = 0;
             TryActivateOnce();
@@ -396,7 +403,18 @@ namespace CommandLauncher
             if (!IsVisible || _list.SelectedItem is not ClipboardEntry entry)
             {
                 _previewWindow.Hide();
+                // 松开对原图位图的引用，否则已释放的缓存仍被 Image 控件引用着（不释放则缓存释放不生效）
+                _previewImage.Source = null;
+                // 此处刻意不释放 _previewedEntry 的缓存：RefreshList 的 _items.Clear() 会让 SelectedItem
+                // 出现瞬态 null（随后又设回同一个条目对象），若在此释放，搜索框每敲一个字符都会重解码当前条目
                 return;
+            }
+
+            // 只保留当前选中条目的预览缓存：选中项真的换成了另一个对象时才释放上一条的原图
+            if (!ReferenceEquals(entry, _previewedEntry))
+            {
+                ReleasePreviewCache(_previewedEntry);
+                _previewedEntry = entry;
             }
 
             if (entry.IsImage)
@@ -404,7 +422,19 @@ namespace CommandLauncher
             else if (entry.Preview.Length > TextPreviewThreshold)
                 ShowTextPreview(entry);
             else
+            {
                 _previewWindow.Hide();
+                _previewImage.Source = null;
+            }
+        }
+
+        /// <summary>释放条目缓存的原图（置空后其像素缓冲可被 GC 回收；只影响运行期缓存，不涉及持久化）。</summary>
+        private static void ReleasePreviewCache(ClipboardEntry? entry)
+        {
+            if (entry == null)
+                return;
+            entry.PreviewImage = null;
+            entry.PreviewImageDecodedWidth = 0;
         }
 
         private void ShowImagePreview(ClipboardEntry entry)
@@ -420,6 +450,7 @@ namespace CommandLauncher
             var bmp = ClipboardHistoryManager.Instance.LoadFullImage(entry, maxPixelWidth);
             if (bmp == null)
             {
+                _previewImage.Source = null;
                 _previewWindow.Hide();
                 return;
             }
@@ -449,6 +480,7 @@ namespace CommandLauncher
             _previewText.Measure(new Size(textW, double.PositiveInfinity));
             double textH = Math.Min(Math.Max(_previewText.DesiredSize.Height, 20), maxH);
 
+            _previewImage.Source = null; // 文本预览不显示图，顺手松开上一张原图
             _previewImage.Visibility = Visibility.Collapsed;
             _previewTextScroll.Visibility = Visibility.Visible;
 
@@ -487,6 +519,8 @@ namespace CommandLauncher
         /// 刷新列表。resetSelection=true 表示「隐藏→显示」的唤出路径：选中重置回第一条并滚到顶部
         /// （与命令启动器 ShowWindow 的 ScrollCommandListToTop 惯例一致）；默认保留当前选中索引，
         /// 供可见态增量刷新使用（Delete 删除后选中下一条等体验依赖该语义）。
+        /// 缩略图不在此处解码：Image.Source 绑定条目 + ThumbnailConverter，由列表虚拟化在行实例化时按需加载
+        /// （上限 1000 时全量预解码会让唤出同步冻结）。查询结果与 _entries 共享条目实例，故缩略图缓存跨刷新生效。
         /// </summary>
         private void RefreshList(bool resetSelection = false)
         {
@@ -494,10 +528,7 @@ namespace CommandLauncher
 
             _items.Clear();
             foreach (var entry in ClipboardHistoryManager.Instance.Query(_searchBox.Text))
-            {
-                ClipboardHistoryManager.Instance.EnsureThumbnail(entry);
                 _items.Add(entry);
-            }
 
             _emptyHint.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Hidden;
             if (_items.Count > 0)
@@ -776,6 +807,27 @@ namespace CommandLauncher
             }
 
             public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+                => throw new NotSupportedException();
+        }
+
+        /// <summary>
+        /// 缩略图按需加载：绑定源是条目本身（Path="."），只在绑定求值（行被实例化 / 容器被复用时）才解码，
+        /// 结果缓存在 ClipboardEntry.Thumbnail 上，滚动回去或重新过滤不会重复解码。
+        /// ListBox 走 WPF 默认虚拟化（VirtualizingStackPanel + VirtualizationMode=Standard），
+        /// 未实例化的行没有 Image 元素、不存在绑定，故上限 1000 也不会在唤出时解码全部图片条目。
+        /// 不要改用 Image.Loaded 事件：容器复用时 DataContext 变化不保证重新触发 Loaded，会显示错位缩略图。
+        /// </summary>
+        private class ThumbnailConverter : IValueConverter
+        {
+            public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+            {
+                if (value is not ClipboardEntry entry)
+                    return null;
+                ClipboardHistoryManager.Instance.EnsureThumbnail(entry);
+                return entry.Thumbnail;
+            }
+
+            public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
                 => throw new NotSupportedException();
         }
     }
