@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -153,6 +155,19 @@ namespace CommandLauncher
         private const double ScrollBarWidthDip = 8.0;  // 竖向滚动条宽度，与 TextScrollViewer 扁平样式里的 Width="8" 对应，改一处要同步另一处
         private static readonly Brush TextBackgroundBrush = Freeze(new SolidColorBrush(Color.FromArgb(240, 30, 30, 30))); // 同剪贴板历史预览窗
 
+        // 文本便签里的链接配色：常态淡蓝、悬停更亮（冻结后跨实例复用，同 NormalBorderBrush 先例）。
+        //
+        // **硬约束：链接 Run 只允许改 Foreground、Background、TextDecorations、Cursor 这四个属性**，
+        // 绝不改字号/字体/粗细/斜体/BaselineAlignment/LineHeight 等任何度量属性。
+        // 原因：窗口尺寸由 _measureBlock 整段 `.Text` 测量得出（见 ApplyTextSize），而 TextBlock.Text = s
+        // 等价于「清空 Inlines + 塞一个隐式 Run{Text=s}」——实测整段 Text 与拆成多个 Run 的 DesiredSize
+        // 逐位相同，所以分段本身不影响测量；但一旦链接 Run 改了度量属性，_measureBlock 的测量就与实际
+        // 渲染脱钩，便签底部会被裁或凭空多出滚动条（同 SnapUpToPixel 注释里记的那个历史坑）。
+        // TextDecorations 是度量安全的：Inline.TextDecorationsProperty 的注册元数据只有 AffectsRender，
+        // 不含 AffectsMeasure。
+        private static readonly Brush LinkBrush = Freeze(new SolidColorBrush(Color.FromRgb(0x5A, 0xB0, 0xFF)));      // 常态淡蓝
+        private static readonly Brush LinkHoverBrush = Freeze(new SolidColorBrush(Color.FromRgb(0xCF, 0xE8, 0xFF))); // 悬停更亮
+
         // 内容模式：图片（既有行为）或文本（便签）
         private enum ContentMode { Image, Text }
 
@@ -240,7 +255,18 @@ namespace CommandLauncher
         private readonly BitmapSource? _source = null;   // 图片模式非空
         private string _text = "";                       // 文本模式非空；编辑落定时更新
         private readonly Image? _image = null;           // 图片模式非空
-        private readonly TextBlock? _textBlock = null;   // 文本模式非空（展示态）
+        // 文本模式非空（展示态）。**真相源是 _text，任何地方都不要读写 _textBlock.Text**：
+        // 链接识别经 RebuildTextInlines 手工填充 Inlines（普通段 Run + 链接段 Run），而手工填充
+        // Inlines 后 TextBlock.Text 的 getter 返回空串（实测），读它只会读到空串、写它会把分好的
+        // 段落全部推倒重来（又变回单个隐式 Run，链接着色与命中表一起失效）。
+        // 一切文本改动都改 _text 再调 RebuildTextInlines。
+        private readonly TextBlock? _textBlock = null;
+        // 链接 Run → 规范化 URL（仅文本模式、仅 UI 线程）：RebuildTextInlines 填充，命中测试与打开时查表。
+        // 以 Run 对象为键（引用相等），故重建 Inlines 必须连带 Clear 整表，不能只加不删
+        private readonly Dictionary<Run, string> _linkRuns = new();
+        private Run? _hoveredLinkRun;   // 当前悬停的链接 Run（null = 无），仅文本模式
+        private Run? _pressedLinkRun;   // 本次按下时命中的链接 Run：松手时未拖动过就打开它，见 OnMouseLeftButtonUpDrag
+        private bool _linkHintShown;    // 本便签是否已提示过「点击打开链接」（只提示一次，避免刷屏）
         private readonly TextBox? _editBox = null;       // 文本模式非空（编辑态）
         private readonly ScrollViewer? _textScroll = null; // 文本模式非空（展示/编辑切换 Content）
         // 测量专用 TextBlock（文本模式非空）：故意永不加入任何可视/逻辑树。
@@ -358,11 +384,17 @@ namespace CommandLauncher
             // 滚动条正常显示——贴图窗口可交互，与预览窗（不抢焦点、点击滚动条会激活导致主窗口失焦）刻意隐藏滚动条的理由不同
             _textBlock = new TextBlock
             {
-                Text = text,
+                // 文本不在这里整段赋值，改由下面的 RebuildTextInlines 填充 Inlines（链接段单独着色）；
+                // 无链接时它退化成「一个普通段 Run」，与整段 Text 的排版完全等价
                 FontSize = 13,
                 Foreground = Brushes.White,
                 TextWrapping = TextWrapping.Wrap,
             };
+            // 填充 Inlines（普通段 + 链接段）。放在 ApplyTextSize 之前：尺寸按 _text 整段测量
+            // （见 RebuildTextInlines 注释），但在窗口测量之前先把内容建好，显示与测量同源。
+            // 此刻 _border 尚未赋值（往下才建），故 RebuildTextInlines 及其调用的 ResetLinkHover
+            // 绝不能引用 _border——光标一律设在 _textBlock 上
+            RebuildTextInlines();
             // 测量副本：排版相关属性与 _textBlock 保持一致（FontFamily 两者同为继承默认值，不显式设）
             _measureBlock = new TextBlock
             {
@@ -407,7 +439,11 @@ namespace CommandLauncher
                 Child = _textScroll,
             };
             _border.MouseEnter += (s, e) => _border.Effect = PinHoverShadow;
-            _border.MouseLeave += (s, e) => _border.Effect = null; // 描边保持分类色，悬停只加阴影（蓝描边与「蓝」分类重复，已弃用）
+            _border.MouseLeave += (s, e) =>
+            {
+                _border.Effect = null; // 描边保持分类色，悬停只加阴影（蓝描边与「蓝」分类重复，已弃用）
+                ResetLinkHover();      // 鼠标离开边框后不会再有 MouseMove，链接悬停高亮会残留到下次进入
+            };
             var root = new Grid();
             root.Children.Add(_border);
             root.Children.Add(_hint);
@@ -453,7 +489,10 @@ namespace CommandLauncher
             }
             ClearSelection(); // 整体隐藏后选中无意义，避免 ShowAll 后残留选中描边
             foreach (var w in _open.ToArray()) // 副本遍历，同 CloseAll 先例
+            {
+                w.ResetLinkHover(); // 隐藏后不会再有 MouseMove，链接悬停高亮会残留到下次显示
                 w.Hide();
+            }
             _allHidden = true;
             Logger.LogInfo($"全部贴图已隐藏，共 {_open.Count} 个");
         }
@@ -1014,6 +1053,139 @@ namespace CommandLauncher
         private static double SnapUpToPixel(double dip, double scale)
             => scale > 0 ? Math.Ceiling(dip * scale) / scale : Math.Ceiling(dip);
 
+        // ---- 文本便签的链接识别（识别与 URL 规范化本身在 LinkDetector，本类只负责渲染与交互）----
+
+        /// <summary>
+        /// 按 _text 重建 _textBlock 的 Inlines：普通段 Run 与链接段 Run 交替，链接段用 LinkBrush 着色。
+        /// 窗口尺寸仍由 _measureBlock 整段 `.Text` 测量（见 ApplyTextSize），**分段不影响测量**：
+        /// 整段 Text 与拆成多个 Run 的 DesiredSize 逐位相同（实测，含中文 + 长 URL + 折行用例），
+        /// 所以链接 Run 只许改颜色类属性、绝不碰度量属性（见 LinkBrush 处的硬约束注释）。
+        /// 所有段的文本拼接严格等于 _text，这是「尺寸不变」的前提；也不产生零长度 Run
+        /// （零长度 Run 不影响排版，但会让 _linkRuns 混进无意义的键）。
+        /// </summary>
+        private void RebuildTextInlines()
+        {
+            ResetLinkHover(); // 旧 Run 即将整体丢弃，先把悬停态与手型光标复位，免得悬停停在一个陈旧的 Run 上
+            _linkRuns.Clear();
+            _textBlock!.Inlines.Clear();
+
+            var links = LinkDetector.Detect(_text);
+            int pos = 0; // 已写入 Inlines 的原文下标（下一个普通段的起点）
+            foreach (var link in links)
+            {
+                if (link.Start < pos)
+                    continue; // 防御性：LinkDetector 契约保证「按出现顺序、互不重叠」，真乱序就丢弃该链接，保证拼接仍等于 _text
+
+                if (link.Start > pos)
+                    _textBlock.Inlines.Add(new Run(_text.Substring(pos, link.Start - pos)));
+
+                var run = new Run(_text.Substring(link.Start, link.Length)) { Foreground = LinkBrush };
+                _textBlock.Inlines.Add(run);
+                _linkRuns[run] = link.Url;
+                pos = link.Start + link.Length;
+            }
+            if (pos < _text.Length)
+                _textBlock.Inlines.Add(new Run(_text.Substring(pos))); // 末段普通文本（无链接时即整段 _text）
+
+            if (_linkRuns.Count > 0)
+                Logger.LogInfo($"文本贴图识别到 {_linkRuns.Count} 个链接");
+        }
+
+        /// <summary>
+        /// 复位链接悬停态：把悬停中的 Run 还原为常态（LinkBrush、无下划线），清空悬停记录与手型光标。
+        /// 光标只设在 _textBlock 上、不碰 _border：本方法会经 RebuildTextInlines 在文本模式构造函数里
+        /// 被调用，那时 _border 还没赋值（见构造函数注释）。
+        /// </summary>
+        private void ResetLinkHover()
+        {
+            if (_hoveredLinkRun == null)
+                return;
+
+            _hoveredLinkRun.Foreground = LinkBrush;
+            _hoveredLinkRun.TextDecorations = null;
+            _hoveredLinkRun = null;
+
+            if (_textBlock != null)
+                _textBlock.Cursor = null; // 图片模式没有 _textBlock；文本模式在编辑态被换出树也不影响赋值
+            Mouse.UpdateCursor(); // 立刻刷新光标，不等下一次 WM_SETCURSOR（复位后可能没有 MouseMove 事件来纠正它）
+        }
+
+        /// <summary>
+        /// 命中测试：pointInTextBlock（_textBlock 自身坐标系）落在某个链接 Run 的字符格上时返回该 Run，
+        /// 否则返回 null。守卫见方法体（无链接 / 图片模式 / 编辑态一律不命中）。
+        /// </summary>
+        private Run? HitTestLinkRun(System.Windows.Point pointInTextBlock)
+        {
+            if (_linkRuns.Count == 0 || _textBlock == null || _isEditing)
+                return null;
+
+            try
+            {
+                // snapToText 必须为 false：true 会吸附到最近的字符格，链接右侧的空白区也会被判成链接，
+                // 单击就打开了「没点到的链接」，比「点边缘没反应」更让人困惑
+                var pos = _textBlock.GetPositionFromPoint(pointInTextBlock, snapToText: false);
+                if (pos?.Parent is Run run && _linkRuns.ContainsKey(run))
+                    return run;
+                return null;
+            }
+            catch (InvalidOperationException)
+            {
+                // 布局信息不可用（元素不在可视树上）时抛出，正常路径已由 _isEditing 挡住，此处仅兜底
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 按鼠标位置更新链接悬停态。目标是同一个 Run 引用时直接返回——写 Run.Foreground 会让 TextBlock
+        /// 重新格式化该行，逐帧对长文本重设会卡（故只在目标变化时才写属性）。
+        /// </summary>
+        private void UpdateLinkHover(System.Windows.Point pointInTextBlock)
+        {
+            var run = HitTestLinkRun(pointInTextBlock);
+            if (ReferenceEquals(run, _hoveredLinkRun))
+                return; // 目标未变：不重复写属性
+
+            ResetLinkHover();
+            if (run == null)
+                return;
+
+            _hoveredLinkRun = run;
+            run.Foreground = LinkHoverBrush;                  // 变亮
+            run.TextDecorations = TextDecorations.Underline;  // 下划线（度量安全，见 LinkBrush 硬约束注释）
+            _textBlock!.Cursor = Cursors.Hand;
+            Mouse.UpdateCursor();
+
+            // 首次悬停才提示「点击打开链接」：用既有角标而非 ToolTip——贴图恒为 Topmost，
+            // ToolTip 也是独立顶层窗口，两者叠加时层级与时机都不受控
+            if (!_linkHintShown)
+            {
+                _linkHintShown = true;
+                ShowBadge("点击打开链接");
+            }
+        }
+
+        /// <summary>
+        /// 用默认浏览器打开链接（单击便签里的链接，判定见 OnMouseLeftButtonUpDrag）。
+        /// 已知副作用（已接受）：本程序以管理员运行，浏览器会继承管理员令牌——与既有
+        /// 「打开帮助文档」「发布页」两个入口行为一致。
+        /// </summary>
+        private void OpenLink(string url)
+        {
+            try
+            {
+                // 必须 UseShellExecute=true：.NET Core 下直接 Process.Start(url) 无法用默认浏览器打开。
+                // 也绝不能用 MediumIntegrityProcess.Start —— 其类注释明确写了不支持 URL/文档关联启动。
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                Logger.LogInfo($"贴图点击打开链接：{url}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("打开链接失败", ex);
+                // 传 owner=this：贴图恒为 Topmost，不传 owner 的错误框会被便签自身盖住，用户只看到「点了没反应」
+                MessageBox.Show(this, $"打开链接失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
         // 双击关闭前把内容备份回剪贴板（非破坏性关闭）：误关后 F7/Ctrl+V/剪贴板历史均可找回。
         // 写回会触发本程序剪贴板监听，经去重置顶刷新而非新增条目。只覆盖双击路径——
         // Esc/右键菜单/删除/关闭所有是明确意图，不备份、也不覆盖用户剪贴板里刚复制的内容。
@@ -1122,6 +1294,13 @@ namespace CommandLauncher
                 }
             }
 
+            // 记下按下时命中的链接：松手时若没拖动过就打开它（见 OnMouseLeftButtonUpDrag）。
+            // 只记录、不影响拖动——越过拖动阈值后 OnMouseMoveDrag 会清掉它，按住链接照样能把便签拖走。
+            // 这里刻意不判 Ctrl：单击即打开（曾要求 Ctrl+点击，用户反馈多此一举）。
+            _pressedLinkRun = _mode == ContentMode.Text && _linkRuns.Count > 0
+                ? HitTestLinkRun(e.GetPosition(_textBlock!))
+                : null;
+
             _dragPending = true; // 见 ③：此处刻意不 CaptureMouse
             _dragging = false;
         }
@@ -1137,7 +1316,13 @@ namespace CommandLauncher
                 _sawReleaseSincePress = true;
 
             if (!_dragPending)
+            {
+                // 仅空闲态检测链接悬停；拖动中不更新（_dragPending 时跳过，避免拖动过程中光标抖动）。
+                // _textBlock 仅文本模式存在，先判 _mode 再求值，避免图片模式下 e.GetPosition(null) 抛异常
+                if (_mode == ContentMode.Text && _linkRuns.Count > 0)
+                    UpdateLinkHover(e.GetPosition(_textBlock!));
                 return;
+            }
             if (e.LeftButton != MouseButtonState.Pressed)
             {
                 EndDrag();
@@ -1154,6 +1339,7 @@ namespace CommandLauncher
                     Math.Abs(dy) < SystemParameters.MinimumVerticalDragDistance * _dragScaleY)
                     return;
                 _dragging = true;
+                _pressedLinkRun = null; // 转为拖动：本次手势不再算「点击链接」，松手时不会打开浏览器
                 // 到这里窗口早已激活，CaptureMouse 不会再踩 WPF 的 !_active 补偿块
                 // （见 OnMouseLeftButtonDown 注释 ③）；失败也继续，拖动时光标基本还在窗口内
                 CaptureMouse();
@@ -1177,18 +1363,29 @@ namespace CommandLauncher
         }
 
         // 真正的左键释放 —— 唯一可信的「用户松手」信号，无条件标记（不看 _dragPending）。
-        // 单击（按下且未越过拖动阈值、非双击）→ 单选被点击的贴图（任何时刻点击即选中，不要求先框选）；
-        // 拖动整体移动时 _dragging 为 true、wasClick=false，不受影响；双击关闭已在
-        // OnMouseLeftButtonDown 提前 return，此处 _dragPending 为 false。
-        // 已知副作用（已接受）：双击关闭贴图时，首击会先单选、次击才关闭，净效果是其余成员失去选中——
-        // 属「单击单选 + 双击关闭」组合语义的自然结果（首击无法预知次击会来）。
+        // 单击（按下且未越过拖动阈值、非双击）：落在链接上 → 打开链接；否则单选被点击的贴图
+        // （任何时刻点击即选中，不要求先框选）。**「打开链接」只能判定在这里、不能放 MouseDown**：
+        // 按下那一刻无从区分「单击」与「按住拖动」，在 MouseDown 里就打开会让用户按住链接时无法拖动便签
+        // （拖动越过阈值后 _dragging 为 true、wasClick=false，这里自然不会打开）。
+        // 双击关闭已在 OnMouseLeftButtonDown 提前 return，此处 _dragPending 为 false。
+        // 已知副作用（已接受）：双击关闭贴图时，首击会先单选/打开链接、次击才关闭，净效果是其余成员失去选中——
+        // 属「单击 + 双击关闭」组合语义的自然结果（首击无法预知次击会来）。
         private void OnMouseLeftButtonUpDrag(object sender, MouseButtonEventArgs e)
         {
             _sawReleaseSincePress = true;
             bool wasClick = _dragPending && !_dragging;
+            var linkRun = _pressedLinkRun; // EndDrag 会清掉它，先取出来
             EndDrag();
-            if (wasClick)
-                SelectOnly();
+            if (!wasClick)
+                return;
+
+            if (linkRun != null && _linkRuns.TryGetValue(linkRun, out var url))
+            {
+                ResetLinkHover(); // 打开后立刻复位高亮（鼠标通常已被浏览器抢走，不会再收到 MouseLeave）
+                OpenLink(url);
+                return;
+            }
+            SelectOnly();
         }
 
         // 结束拖动并归还捕获。**刻意不在这里置 _sawReleaseSincePress**：本方法也挂在
@@ -1202,6 +1399,7 @@ namespace CommandLauncher
                 return;
             _dragPending = false;
             _dragging = false;
+            _pressedLinkRun = null; // 本次手势结束，链接候选一并作废
             if (IsMouseCaptured)
                 ReleaseMouseCapture();
 
@@ -1274,6 +1472,9 @@ namespace CommandLauncher
             if (_mode != ContentMode.Text || _isEditing)
                 return;
             _isEditing = true;
+            // 清链接悬停态：_textBlock 即将被 _editBox 换出可视树（悬停高亮会留在陈旧 Run 上），
+            // 且编辑态光标应为 TextBox 自己的 IBeam，不该残留链接的手型
+            ResetLinkHover();
 
             // 进入编辑即放大，但**左上角固定不动**：上限 = min(内容上限, 内容左上角到工作区右/下
             // 边缘的剩余空间)（GetMaxContentSize(anchored) 已把边距从上限里扣掉，这里加回才是完整
@@ -1327,7 +1528,10 @@ namespace CommandLauncher
             if (!cancel)
             {
                 _text = _editBox!.Text;
-                _textBlock!.Text = _text;
+                // 文本变了要按新内容重新识别链接并重建 Inlines（原先是直接写 _textBlock.Text，
+                // 手工填充 Inlines 后该属性 getter 恒为空串，不能再作为文本赋值入口）。
+                // 取消路径刻意不重建：_text 未变，旧 Run 与 _linkRuns 仍自洽
+                RebuildTextInlines();
                 Logger.LogInfo($"文本贴图编辑已保存：{_text.Length} 字符");
                 PinStore.ScheduleSave(); // 文本内容变化，保存最新文本
             }
