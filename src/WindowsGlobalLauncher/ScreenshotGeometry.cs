@@ -225,5 +225,105 @@ namespace CommandLauncher
             double h = Math.Min(baseMaxContentH, Math.Max(availH, minContentH));
             return (w, h);
         }
+
+        // ================= 标注命中测试（纯几何，AnnotationController 调用） =================
+
+        /// <summary>
+        /// 包围盒命中（含 tolerance 容差，边界为闭区间）；Rect.Empty 恒不命中。
+        /// 刻意不用 Rect.Inflate 实现：它对 Rect.Empty 会抛异常，而调用方在鼠标事件路径上。
+        /// </summary>
+        public static bool HitTestBounds(Rect rect, double tolerance, Point p)
+        {
+            if (rect.IsEmpty)
+                return false;
+            return p.X >= rect.X - tolerance && p.X <= rect.Right + tolerance &&
+                   p.Y >= rect.Y - tolerance && p.Y <= rect.Bottom + tolerance;
+        }
+
+        /// <summary>点集包围盒；空集合返回 Rect.Empty，单点返回尺寸为 0 的矩形（非 Empty）。</summary>
+        public static Rect PointsBounds(PointCollection points)
+        {
+            if (points == null || points.Count == 0)
+                return Rect.Empty;
+
+            double minX = double.MaxValue, minY = double.MaxValue;
+            double maxX = double.MinValue, maxY = double.MinValue;
+            foreach (Point p in points)
+            {
+                minX = Math.Min(minX, p.X);
+                minY = Math.Min(minY, p.Y);
+                maxX = Math.Max(maxX, p.X);
+                maxY = Math.Max(maxY, p.Y);
+            }
+            return new Rect(minX, minY, maxX - minX, maxY - minY);
+        }
+
+        /// <summary>
+        /// 空心矩形/椭圆的「描边带」命中：只认边框，内部空白与外部都不命中
+        /// （内部空白穿透是实现「在大矩形内部继续画小矩形」的关键）。
+        /// rect 是元素的布局矩形（Canvas.Left/Top + Width/Height）；点击容差为描边两侧各 tolerance。
+        ///
+        /// **关键前提**：WPF 的 Rectangle/Ellipse 把描边画在布局矩形【内侧】（实测 W=100/H=50/线宽 10
+        /// 的 Rectangle，RenderedGeometry.Bounds = (5,5,90,40)），即布局矩形是描边外沿，
+        /// 几何中线须内缩半个线宽 —— 直接拿布局矩形建几何会让命中带整体外偏半个线宽。
+        /// </summary>
+        public static bool HitTestShapeBorder(bool isEllipse, Rect rect, double strokeThickness, double tolerance, Point p)
+        {
+            if (rect.IsEmpty)
+                return false; // EllipseGeometry(Rect.Empty) 会抛异常
+
+            double half = strokeThickness / 2.0;
+            // 内缩到描边中线。Math.Max(0,..) 不可省：线宽大于边长时（如宽 4、线宽 12 的合法元素）
+            // new Rect 收到负宽度会抛 ArgumentException，而本函数跑在鼠标事件路径上
+            var center = new Rect(
+                rect.X + half, rect.Y + half,
+                Math.Max(0, rect.Width - strokeThickness),
+                Math.Max(0, rect.Height - strokeThickness));
+
+            // 预筛放宽到「中线 ± (半个线宽 + 容差)」而非「布局矩形 ± 容差」：退化形状（边长 < 线宽）下
+            // 命中带会越出布局矩形，用后者会把本该命中的点误拒
+            if (!HitTestBounds(center, half + tolerance, p))
+                return false;
+
+            Geometry geometry = isEllipse ? new EllipseGeometry(center) : new RectangleGeometry(center);
+            // Pen 厚度取「线宽 + 2×容差」才得到两侧各扩容差（StrokeContains 的命中带 = 以几何线为中心、
+            // 宽 = Pen.Thickness）；二参重载另带 0.25 DIP 的隐式扁平化容差，方向无害
+            var pen = new Pen(Brushes.Black, strokeThickness + 2.0 * tolerance);
+            return geometry.StrokeContains(pen, p);
+        }
+
+        /// <summary>
+        /// 实心多边形（箭头）命中：几何填充区域 + 边界 tolerance 容差带。
+        /// 点集少于 3 个构不成多边形，恒不命中。
+        /// </summary>
+        public static bool HitTestPolygonFill(PointCollection points, double tolerance, Point p)
+        {
+            if (points == null || points.Count < 3)
+                return false;
+
+            if (!HitTestBounds(PointsBounds(points), tolerance, p))
+                return false;
+
+            var figure = new PathFigure { StartPoint = points[0], IsClosed = true, IsFilled = true };
+            var segment = new PolyLineSegment();
+            for (int i = 1; i < points.Count; i++)
+                segment.Points.Add(points[i]);
+            figure.Segments.Add(segment);
+            var geometry = new PathGeometry();
+            geometry.Figures.Add(figure);
+
+            if (geometry.FillContains(p))
+                return true;
+
+            // 边界容差带：Pen 的连接/端点取圆角，外扩量严格等于 tolerance；默认的 Miter 在锐角处会外扩
+            // tolerance/sin(θ/2)（箭头尖端夹角约 41°，外扩远超容差），那会让上面的包围盒预筛变成假阴性
+            var pen = new Pen(Brushes.Black, tolerance * 2.0)
+            {
+                LineJoin = PenLineJoin.Round,
+                StartLineCap = PenLineCap.Round,
+                EndLineCap = PenLineCap.Round,
+            };
+            return geometry.StrokeContains(pen, p);
+        }
     }
 }

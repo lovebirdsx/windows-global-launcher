@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Media;
 using CommandLauncher;
 using Xunit;
 
@@ -271,6 +272,165 @@ namespace WindowsGlobalLauncher.Tests
                 minContentW: 120, minContentH: 20);
 
             Assert.Equal((60.0, 15.0), result);
+        }
+
+        // ================= 标注命中测试 =================
+        // 与上面那组不同，本组含椭圆与几何描边判定（WPF 的 StrokeContains 自带有 0.25 DIP 的隐式扁平化容差），
+        // 探针一律离判定边界 ≥0.5 DIP，不能卡在边界上取精确相等。
+
+        [Theory]
+        [InlineData(50, 25, true)]     // 内部
+        [InlineData(104, 25, true)]    // 右边界上（闭区间）
+        [InlineData(-4, -4, true)]     // 左上角外，恰在容差内
+        [InlineData(105, 25, false)]   // 右边界外 1 DIP
+        [InlineData(-5, 25, false)]    // 左边界外 1 DIP
+        public void HitTestBounds_WithinTolerance_ReturnsExpected(double x, double y, bool expected)
+        {
+            bool result = ScreenshotGeometry.HitTestBounds(new Rect(0, 0, 100, 50), 4.0, new Point(x, y));
+
+            Assert.Equal(expected, result);
+        }
+
+        [Fact]
+        public void HitTestBounds_EmptyRect_ReturnsFalse()
+        {
+            // 实现刻意不用 Rect.Inflate（它对 Rect.Empty 会抛异常），这条同时守住「不抛」
+            Assert.False(ScreenshotGeometry.HitTestBounds(Rect.Empty, 4.0, new Point(0, 0)));
+        }
+
+        [Fact]
+        public void PointsBounds_EmptyOrNull_ReturnsEmpty()
+        {
+            Assert.True(ScreenshotGeometry.PointsBounds(null!).IsEmpty);
+            Assert.True(ScreenshotGeometry.PointsBounds(new PointCollection()).IsEmpty);
+        }
+
+        [Fact]
+        public void PointsBounds_SinglePoint_ReturnsZeroSizedRect()
+        {
+            Rect bounds = ScreenshotGeometry.PointsBounds(new PointCollection { new Point(3, 4) });
+
+            Assert.Equal(new Rect(3, 4, 0, 0), bounds);
+            Assert.False(bounds.IsEmpty); // 尺寸为 0 不等于 Empty（与空集合区分）
+        }
+
+        [Fact]
+        public void PointsBounds_MultiplePoints_ReturnsBoundingBox()
+        {
+            var points = new PointCollection { new Point(5, 9), new Point(-3, 20), new Point(11, 2) };
+
+            Assert.Equal(new Rect(-3, 2, 14, 18), ScreenshotGeometry.PointsBounds(points));
+        }
+
+        // 布局矩形 (0,0,100,50)、线宽 3 → 描边中线 (1.5,1.5,97,47)，命中带半宽 = 3/2 + 4 = 5.5。
+        [Theory]
+        [InlineData(1.5, 25, true)]    // 左边框的中线上
+        [InlineData(50, 1.5, true)]    // 上边框的中线上
+        [InlineData(1.5, 1.5, true)]   // 左上角（角也属于边框带）
+        [InlineData(-3.5, 25, true)]   // 边框外侧 5 DIP：容差内
+        [InlineData(6.5, 25, true)]    // 边框内侧 5 DIP：容差内
+        [InlineData(-5, 25, false)]    // 边框外侧 6.5 DIP：容差外
+        [InlineData(8, 25, false)]     // 边框内侧 6.5 DIP：容差外
+        [InlineData(50, 25, false)]    // ★ 内部空白必须穿透——否则无法在大矩形内部继续画小矩形
+        public void HitTestShapeBorder_Rectangle_OnlyBorderBandHits(double x, double y, bool expected)
+        {
+            bool result = ScreenshotGeometry.HitTestShapeBorder(
+                isEllipse: false, new Rect(0, 0, 100, 50),
+                strokeThickness: 3.0, tolerance: 4.0, new Point(x, y));
+
+            Assert.Equal(expected, result);
+        }
+
+        [Theory]
+        [InlineData(1.5, 25, true)]    // 零宽矩形的描边中线
+        [InlineData(5, 25, true)]      // 距中线 3.5 DIP：容差内
+        [InlineData(9.5, 25, false)]   // 距中线 8 DIP：容差外
+        public void HitTestShapeBorder_ZeroWidthRectangle_DegradesToBand(double x, double y, bool expected)
+        {
+            bool result = ScreenshotGeometry.HitTestShapeBorder(
+                isEllipse: false, new Rect(0, 0, 0, 50),
+                strokeThickness: 3.0, tolerance: 4.0, new Point(x, y));
+
+            Assert.Equal(expected, result);
+        }
+
+        [Fact]
+        public void HitTestShapeBorder_StrokeWiderThanSide_DoesNotThrow()
+        {
+            // 宽 4、线宽 12 是合法元素（MinShapeSize 只要求宽高不同时小于 3）：内缩后边长成负值，
+            // 实现须钳到 0，而不是让 new Rect 抛 ArgumentException（那条路径在鼠标事件里）
+            const double x = 6.0; // 描边中线
+
+            Assert.True(ScreenshotGeometry.HitTestShapeBorder(
+                isEllipse: false, new Rect(0, 0, 4, 100), 12.0, 4.0, new Point(x, 50)));
+            Assert.False(ScreenshotGeometry.HitTestShapeBorder(
+                isEllipse: false, new Rect(0, 0, 4, 100), 12.0, 4.0, new Point(x + 12, 50)));
+            Assert.True(ScreenshotGeometry.HitTestShapeBorder(
+                isEllipse: true, new Rect(0, 0, 4, 100), 12.0, 4.0, new Point(x, 50)));
+        }
+
+        [Fact]
+        public void HitTestShapeBorder_EmptyRect_ReturnsFalseWithoutThrowing()
+        {
+            // EllipseGeometry(Rect.Empty) 会抛异常，实现必须提前挡掉
+            Assert.False(ScreenshotGeometry.HitTestShapeBorder(isEllipse: true, Rect.Empty, 3.0, 4.0, new Point(0, 0)));
+            Assert.False(ScreenshotGeometry.HitTestShapeBorder(isEllipse: false, Rect.Empty, 3.0, 4.0, new Point(0, 0)));
+        }
+
+        // 同上布局矩形：描边中线为椭圆 (中心 (50,25)，rx=48.5、ry=23.5)。
+        [Theory]
+        [InlineData(1.5, 25, true)]    // 左顶点（在椭圆环上）
+        [InlineData(50, 1.5, true)]    // 上顶点
+        [InlineData(98.5, 25, true)]   // 右顶点
+        [InlineData(50, 25, false)]    // ★ 椭圆内部空白必须穿透
+        [InlineData(50, 40, false)]    // 内部靠下：距下边界 8.5 DIP
+        [InlineData(2, 2, false)]      // ★ 布局矩形的角：椭圆之外，旧的包围盒实现会误判命中
+        public void HitTestShapeBorder_Ellipse_OnlyRingHits(double x, double y, bool expected)
+        {
+            bool result = ScreenshotGeometry.HitTestShapeBorder(
+                isEllipse: true, new Rect(0, 0, 100, 50),
+                strokeThickness: 3.0, tolerance: 4.0, new Point(x, y));
+
+            Assert.Equal(expected, result);
+        }
+
+        // 水平向右箭头 from=(0,10) to=(100,10) width=4：箭杆 y∈[8,12]、尾 x∈[0,84]、翼展到 y∈[4,16]。
+        [Theory]
+        [InlineData(50, 10, true)]     // 箭杆填充内
+        [InlineData(99, 10, true)]     // 尖端附近的填充内
+        [InlineData(103, 10, true)]    // 尖端外 3 DIP：容差带内
+        [InlineData(50, 3, false)]     // ★ 包围盒内、箭杆外的空白：距边界 5 DIP，必须穿透
+        [InlineData(105, 10, false)]   // 尖端外 5 DIP：容差带外
+        public void HitTestPolygonFill_Arrow_OnlyFillAndToleranceBand(double x, double y, bool expected)
+        {
+            var arrow = ScreenshotGeometry.BuildArrowPolygon(new Point(0, 10), new Point(100, 10), 4);
+
+            Assert.Equal(expected, ScreenshotGeometry.HitTestPolygonFill(arrow, 4.0, new Point(x, y)));
+        }
+
+        [Fact]
+        public void HitTestPolygonFill_Triangle_KeepsBoundsBlankTransparent()
+        {
+            // 直角三角形 (0,0)-(100,0)-(0,100)：斜边外侧的大片空白都在包围盒内，
+            // 旧实现按包围盒命中会把这一整片拦截（与箭头包围盒空白角抢走绘制是同一个问题）
+            var triangle = new PointCollection { new Point(0, 0), new Point(100, 0), new Point(0, 100) };
+
+            Assert.True(ScreenshotGeometry.HitTestPolygonFill(triangle, 4.0, new Point(10, 10)));      // 填充内
+            Assert.True(ScreenshotGeometry.HitTestPolygonFill(triangle, 4.0, new Point(51, 51)));      // 斜边外约 1.4 DIP：容差带内
+            Assert.True(ScreenshotGeometry.HitTestPolygonFill(triangle, 4.0, new Point(0, -2)));       // 顶点外 2 DIP：容差带内
+            Assert.False(ScreenshotGeometry.HitTestPolygonFill(triangle, 4.0, new Point(53.5, 53.5))); // 斜边外约 5 DIP
+            Assert.False(ScreenshotGeometry.HitTestPolygonFill(triangle, 4.0, new Point(80, 80)));     // 斜边外约 42 DIP
+        }
+
+        [Fact]
+        public void HitTestPolygonFill_TooFewPoints_ReturnsFalse()
+        {
+            Assert.False(ScreenshotGeometry.HitTestPolygonFill(null!, 4.0, new Point(0, 0)));
+            Assert.False(ScreenshotGeometry.HitTestPolygonFill(new PointCollection(), 4.0, new Point(0, 0)));
+            Assert.False(ScreenshotGeometry.HitTestPolygonFill(
+                new PointCollection { new Point(0, 0) }, 4.0, new Point(0, 0)));
+            Assert.False(ScreenshotGeometry.HitTestPolygonFill(
+                new PointCollection { new Point(0, 0), new Point(5, 5) }, 4.0, new Point(1, 1)));
         }
     }
 }

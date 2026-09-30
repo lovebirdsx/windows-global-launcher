@@ -152,6 +152,7 @@ namespace CommandLauncher
             MouseMove += OnOverlayMouseMove;
             MouseLeftButtonUp += OnOverlayMouseUp;
             PreviewKeyDown += OnOverlayPreviewKeyDown;
+            PreviewKeyUp += OnOverlayPreviewKeyUp;
             PreviewMouseWheel += OnOverlayPreviewMouseWheel;
         }
 
@@ -349,7 +350,9 @@ namespace CommandLauncher
                 case OverlayState.Annotating:
                     if (_selection.Contains(phys))
                     {
-                        _annotation.OnMouseDown(dip);
+                        // 按住 Alt 放宽命中：在元素内部任意位置都能拖动它。修饰键只在按下这一刻读取，
+                        // 中途松开不改变本次行为（闩锁语义）
+                        _annotation.OnMouseDown(dip, looseHit: Keyboard.Modifiers.HasFlag(ModifierKeys.Alt));
                         _annotationMouseActive = true;
                         CaptureMouse();
                     }
@@ -396,8 +399,34 @@ namespace CommandLauncher
                 case OverlayState.Annotating:
                     if (_annotationMouseActive)
                         _annotation.OnMouseMove(dip);
+                    else
+                        UpdateAnnotationHoverCursor();
                     break;
             }
+        }
+
+        /// <summary>
+        /// 标注态悬停光标：可拖动处（按住 Alt 时按包围盒放宽）显示移动光标，其余位置十字光标。
+        /// 除鼠标移动外，Alt 的按下/松开也各调一次——Alt 决定「这次拖动是移动已有元素还是画新图形」，
+        /// 光标不能等到鼠标挪动才跟上。
+        /// 工具条虽盖在标注层之上，但它自带元素级箭头光标（见 BuildToolbar），本方法设的窗口级光标覆盖不了它。
+        /// </summary>
+        private void UpdateAnnotationHoverCursor()
+        {
+            if (_state != OverlayState.Annotating || _annotationMouseActive)
+                return; // 仅标注态、且未按下鼠标时生效（拖拽中不抢光标）
+
+            Point dip = Mouse.GetPosition(_rootCanvas);
+            bool looseHit = Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
+            Cursor = _selection.Contains(ToPhysical(dip)) && _annotation.CanDragAt(dip, looseHit)
+                ? Cursors.SizeAll
+                : Cursors.Cross;
+        }
+
+        private void OnOverlayPreviewKeyUp(object sender, KeyEventArgs e)
+        {
+            if (e.Key is Key.System or Key.LeftAlt or Key.RightAlt)
+                UpdateAnnotationHoverCursor();
         }
 
         private void OnOverlayMouseUp(object sender, MouseButtonEventArgs e)
@@ -516,6 +545,10 @@ namespace CommandLauncher
             // 文字标注编辑中：Enter/Esc 等交给 TextBox 自己处理（AnnotationController 内已接管）
             if (Keyboard.FocusedElement is TextBox)
                 return;
+
+            // Alt 按下：它会放宽命中、改变这次拖动的语义，光标立刻跟上（Alt 自身不消耗，继续走下面分支）
+            if (e.Key is Key.System or Key.LeftAlt or Key.RightAlt)
+                UpdateAnnotationHoverCursor();
 
             bool shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
             bool ctrl = Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
@@ -805,9 +838,16 @@ namespace CommandLauncher
 
             panel.Children.Add(MakeSeparator());
 
-            // 颜色块
-            Color[] palette = { Color.FromRgb(255, 64, 64), Color.FromRgb(255, 212, 0), AccentBlue, Colors.White };
-            foreach (var color in palette)
+            // 颜色块（色块是纯色无文字的控件，用 ToolTip 标明颜色名，否则新色无从辨认）
+            (string Name, Color Value)[] palette =
+            {
+                ("红色", Color.FromRgb(255, 64, 64)),
+                ("黄色", Color.FromRgb(255, 212, 0)),
+                ("绿色", Color.FromRgb(0, 200, 83)),
+                ("蓝色", AccentBlue),
+                ("白色", Colors.White),
+            };
+            foreach (var (name, color) in palette)
             {
                 var swatchColor = color; // 闭包捕获
                 var swatch = new Border
@@ -820,6 +860,7 @@ namespace CommandLauncher
                     BorderThickness = new Thickness(2),
                     CornerRadius = new CornerRadius(2),
                     Cursor = Cursors.Hand,
+                    ToolTip = name,
                     Tag = swatchColor,
                 };
                 swatch.MouseLeftButtonDown += (_, e) => { SelectColor(swatchColor); e.Handled = true; };
@@ -845,6 +886,8 @@ namespace CommandLauncher
                 CornerRadius = new CornerRadius(8),
                 Padding = new Thickness(6),
                 Visibility = Visibility.Collapsed,
+                // 元素级光标：鼠标移到工具条上时不残留标注层的移动/十字光标（色块自带 Hand，不受影响）
+                Cursor = Cursors.Arrow,
                 Child = panel,
             };
             // 工具条空白区的点击不能落到窗口（否则会被当成移动选区/开始标注）

@@ -171,7 +171,12 @@ namespace CommandLauncher
 
         // ================= 鼠标事件入口（宿主转发 Canvas DIP 坐标） =================
 
-        public void OnMouseDown(Point dip)
+        /// <summary>
+        /// 鼠标按下。
+        /// looseHit = false（默认）：空心图形只认描边带，点内部空白穿透 → 直接画新图形；
+        /// looseHit = true（宿主按住 Alt 时传入）：放宽为整个包围盒，便于在元素内部任意位置拖动它。
+        /// </summary>
+        public void OnMouseDown(Point dip, bool looseHit = false)
         {
             if (_activeTool == AnnotationTool.None)
                 return;
@@ -180,7 +185,7 @@ namespace CommandLauncher
             DiscardPendingDrag();
 
             // 命中已落定元素 → 进入移动模式（优先于新建；编辑中的文字框不入撤销栈、不会被命中）
-            UIElement? hit = HitTestAnnotation(dip);
+            UIElement? hit = HitTestAnnotation(dip, looseHit);
             if (hit != null)
             {
                 CommitPendingText(); // 落定编辑中的文字，避免与移动并存
@@ -502,18 +507,22 @@ namespace CommandLauncher
 
         // ================= 移动已落定元素 =================
 
+        /// <summary>是否可在该点拖动已落定元素（供宿主做悬停光标反馈；无副作用、可每帧调用）。</summary>
+        public bool CanDragAt(Point dip, bool looseHit) => HitTestAnnotation(dip, looseHit) != null;
+
         /// <summary>命中测试已落定元素（撤销栈为 LIFO，后画先命中），返回命中的元素或 null。</summary>
-        private UIElement? HitTestAnnotation(Point dip)
+        /// <param name="looseHit">true 时空心图形与箭头按整个包围盒命中，false 时各按自身精确形状命中。</param>
+        private UIElement? HitTestAnnotation(Point dip, bool looseHit)
         {
             foreach (UIElement element in _undoStack)
             {
-                if (HitTestElement(element, dip))
+                if (HitTestElement(element, dip, looseHit))
                     return element;
             }
             return null;
         }
 
-        private static bool HitTestElement(UIElement element, Point dip)
+        private static bool HitTestElement(UIElement element, Point dip, bool looseHit)
         {
             const double tolerance = 4.0; // 点击容差（DIP）
             switch (element)
@@ -521,13 +530,18 @@ namespace CommandLauncher
                 case Rectangle:
                 case Ellipse:
                     var shape = (Shape)element;
-                    double sx = Canvas.GetLeft(shape);
-                    double sy = Canvas.GetTop(shape);
-                    return dip.X >= sx - tolerance && dip.X <= sx + shape.Width + tolerance &&
-                           dip.Y >= sy - tolerance && dip.Y <= sy + shape.Height + tolerance;
+                    var rect = new Rect(Canvas.GetLeft(shape), Canvas.GetTop(shape), shape.Width, shape.Height);
+                    if (looseHit)
+                        return ScreenshotGeometry.HitTestBounds(rect, tolerance, dip);
+                    // 空心图形只认描边带：点内部空白穿透，可直接在其内部继续画新图形
+                    return ScreenshotGeometry.HitTestShapeBorder(
+                        isEllipse: element is Ellipse, rect, shape.StrokeThickness, tolerance, dip);
 
                 case Polygon polygon:
-                    return InBounds(polygon.Points, dip, tolerance);
+                    if (looseHit)
+                        return ScreenshotGeometry.HitTestBounds(ScreenshotGeometry.PointsBounds(polygon.Points), tolerance, dip);
+                    // 箭头是实心多边形：按填充区域命中，其包围盒内的空白角区不再拦截绘制
+                    return ScreenshotGeometry.HitTestPolygonFill(polygon.Points, tolerance, dip);
 
                 case Polyline polyline:
                     double half = polyline.StrokeThickness / 2.0 + tolerance;
@@ -539,7 +553,9 @@ namespace CommandLauncher
                     return false;
 
                 case TextBlock block:
-                    block.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                    // 悬停光标反馈会每帧调用本方法：布局有效时跳过 Measure（Canvas 本就是以无限尺寸测量子元素）
+                    if (!block.IsMeasureValid)
+                        block.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
                     double tx = Canvas.GetLeft(block);
                     double ty = Canvas.GetTop(block);
                     double tw = Math.Max(block.DesiredSize.Width, block.ActualWidth);
@@ -605,18 +621,6 @@ namespace CommandLauncher
             for (int i = 0; i < points.Count; i++)
                 points[i] = points[i] + delta;
             return delta;
-        }
-
-        private static bool InBounds(PointCollection points, Point dip, double tolerance)
-        {
-            double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
-            foreach (Point p in points)
-            {
-                minX = Math.Min(minX, p.X); maxX = Math.Max(maxX, p.X);
-                minY = Math.Min(minY, p.Y); maxY = Math.Max(maxY, p.Y);
-            }
-            return dip.X >= minX - tolerance && dip.X <= maxX + tolerance &&
-                   dip.Y >= minY - tolerance && dip.Y <= maxY + tolerance;
         }
 
         private static double DistanceToSegment(Point p, Point a, Point b)
