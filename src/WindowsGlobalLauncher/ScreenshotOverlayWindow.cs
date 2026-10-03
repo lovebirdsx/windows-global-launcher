@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -126,6 +127,9 @@ namespace CommandLauncher
             AllowsTransparency = false;     // 整窗不透明（性能好），压暗靠内容层
             ResizeMode = ResizeMode.NoResize;
             ShowInTaskbar = false;
+            ShowActivated = false; // 不抢焦点：与切换器/框选遮罩/命令面板/贴图/剪贴板窗一致，激活统一延到
+                                   // OnOverlayLoaded 走 WindowEnumerator.Activate；避免 Show 内部抢前台时被旧前台
+                                   // 窗口拖住（曾观察到整条显示路径卡 5~34 秒），且用户不会看到「前台已被抢走但窗口还不可用」。
             Topmost = true;
             WindowStartupLocation = WindowStartupLocation.Manual;
             Cursor = Cursors.Cross;
@@ -224,25 +228,60 @@ namespace CommandLauncher
             _rootCanvas.Children.Add(_toolbar);
         }
 
+        /// <summary>Show() 返回的时刻（由 ScreenshotManager 在 Show() 之后立即调用），用于量「Show 返回 → Loaded 开始」的间隔。</summary>
+        private long _showReturnedTimestamp;
+
+        internal void MarkShowReturned() => _showReturnedTimestamp = Stopwatch.GetTimestamp();
+
+        /// <summary>两个 Stopwatch 时间戳之间的毫秒数（取整）。</summary>
+        private static long Ms(long from, long to) => (to - from) * 1000 / Stopwatch.Frequency;
+
         private void OnOverlayLoaded(object? sender, RoutedEventArgs e)
         {
+            long tLoaded = Stopwatch.GetTimestamp();
+            double showToLoadedMs = _showReturnedTimestamp == 0
+                ? -1
+                : (tLoaded - _showReturnedTimestamp) * 1000.0 / Stopwatch.Frequency; // -1 = 未经 Show 路径（理论上不会）
+
+            // 构造里设了 ShowActivated=false，正常情况下此刻窗口还不是活动窗口。若已是，说明该标志
+            // 没生效——本仓 WindowEnumerator 记过这个坑：进程首次 ShowWindow 的 nCmdShow 会被
+            // STARTUPINFO 的 wShowWindow 替换（只消耗一次）。该情形下「Show 内耗时」会含激活开销，
+            // 会让 A/B 判别（激活 vs 首帧渲染）失真，故留痕。
+            bool activeAfterShow = IsActive;
+
             _scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
             ApplyLayout();
+            long tLayout = Stopwatch.GetTimestamp();
 
             // 低级钩子触发的显示不抢焦点，直接 Activate 会被前台锁定拒绝（窗口弹出但无键盘焦点，
             // 导致 Esc/Enter/C/方向键等快捷键失效）。复用 WindowEnumerator.Activate 的
             // AttachThreadInput 技巧绕过前台锁定，确保遮罩能接收键盘。
             WindowEnumerator.Activate(new WindowInteropHelper(this).Handle);
+            long tActivate = Stopwatch.GetTimestamp();
+
             Focus();
+            long tFocus = Stopwatch.GetTimestamp();
+
+            // ShowActivated=false 后「抢前台」只剩这一条路径且没有重试：失败即整场键盘失效
+            // （Esc/Enter/方向键/C 取色全无响应、只剩鼠标可用），必须留痕，否则完全静默。
+            if (activeAfterShow)
+                Logger.LogInfo("遮罩 Show() 后已处于活动状态（ShowActivated=false 未生效），本次「Show 内耗时」可能含激活开销");
+            if (!IsActive)
+                Logger.LogWarning("遮罩抢前台失败：Activate + Focus 后 IsActive 仍为 false，键盘快捷键（Esc/Enter/方向键/C 取色）将失效，鼠标操作不受影响");
 
             // 初始悬停：按当前鼠标位置立即高亮，避免「弹出后一动不动就没有反馈」
             var cursor = System.Windows.Forms.Cursor.Position;
             var phys = new System.Drawing.Point(cursor.X, cursor.Y);
             UpdateHover(phys);
+            long tHover = Stopwatch.GetTimestamp();
+
             UpdateMagnifier(ToDip(phys));
+            long tMagnifier = Stopwatch.GetTimestamp();
 
             Logger.LogInfo($"截图遮罩已显示：虚拟屏 ({_virtualBounds.X},{_virtualBounds.Y}) " +
-                           $"{_virtualBounds.Width}x{_virtualBounds.Height}，DPI scale={_scale:0.##}");
+                           $"{_virtualBounds.Width}x{_virtualBounds.Height}，DPI scale={_scale:0.##}" +
+                           $"；耗时明细：Show→Loaded {showToLoadedMs:0}ms，布局 {Ms(tLoaded, tLayout)}ms，激活 {Ms(tLayout, tActivate)}ms，" +
+                           $"Focus {Ms(tActivate, tFocus)}ms，悬停 {Ms(tFocus, tHover)}ms，放大镜 {Ms(tHover, tMagnifier)}ms");
         }
 
         /// <summary>按当前 _scale 布置根 Canvas 与全尺寸层（DIP = 物理 / _scale）。</summary>

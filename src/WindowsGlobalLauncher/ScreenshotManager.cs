@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -52,6 +53,11 @@ namespace CommandLauncher
         /// <summary>发起一次区域截图：冻结整个虚拟屏 → 弹出全屏遮罩交互选区。仅 UI 线程调用。</summary>
         public static void StartCapture()
         {
+            // 计时从入口就开始：日志时间戳只到秒，而「收到请求 → 抓屏完成」这一段（护眼挂起 + DwmFlush×2
+            // + CopyFromScreen + 护眼恢复）恰是要精确量的对象，靠秒级时间戳相减误差可达 ±2s。
+            var sw = Stopwatch.StartNew();
+
+            Logger.LogInfo("收到截图请求");
             if (IsCapturing)
             {
                 Logger.LogWarning("截图已在进行中，忽略重入");
@@ -91,11 +97,24 @@ namespace CommandLauncher
                     + (eyeCareSuspended ? "（抓屏期间已临时挂起）" : "")
                     + $"；弹出前前台窗口=0x{_previousForeground.ToInt64():X}");
 
+                long captureMs = sw.ElapsedMilliseconds;
+                sw.Restart();
                 var snapshot = WindowRectSnapshot.Capture(IntPtr.Zero);
+                long snapshotMs = sw.ElapsedMilliseconds;
+
+                sw.Restart();
                 var overlay = new ScreenshotOverlayWindow(frozen, bounds, snapshot);
+                long ctorMs = sw.ElapsedMilliseconds;
+
                 overlay.Completed += HandleResult;
                 _activeOverlay = overlay;
+
+                sw.Restart();
                 overlay.Show();
+                long showMs = sw.ElapsedMilliseconds;
+                overlay.MarkShowReturned();
+
+                Logger.LogInfo($"截图各阶段耗时：抓屏 {captureMs}ms，窗口快照 {snapshotMs}ms，遮罩构造 {ctorMs}ms，Show {showMs}ms");
             }
             catch (Exception ex)
             {
