@@ -83,6 +83,23 @@ namespace CommandLauncher
         /// <summary>由切换器提供：当前切换器是否处于激活态（决定是否吞掉 Esc / 触发 Commit）。</summary>
         public Func<bool>? IsSwitcherActive { get; set; }
 
+        private bool _isSuppressed;
+        /// <summary>
+        /// 抑制开关（按键录制期间由 SwitcherWindow 置 true）：Alt+Tab 只吞不触发切换器。
+        /// 正常路径下更晚安装的 KeyboardHook 已抢先把按键吞掉，这里是钩子链顺序不如预期时的保险。
+        /// 切换器自身处于激活态时不抑制，保证 Commit/Cancel 仍可用。
+        /// </summary>
+        public bool IsSuppressed
+        {
+            get => _isSuppressed;
+            set
+            {
+                _isSuppressed = value;
+                if (value)
+                    _altDown = false; // 抑制期间不跟踪 Alt 状态，避免恢复后误触发 Commit
+            }
+        }
+
         private readonly LowLevelKeyboardProc _proc; // 字段强引用，防止委托被 GC 回收
         private IntPtr _hookId = IntPtr.Zero;
         private bool _disposed;
@@ -146,6 +163,10 @@ namespace CommandLauncher
             // Tab：Alt 按住时触发切换并吞掉（阻止系统原生 Alt+Tab）
             if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && vk == VK_TAB && _altDown)
             {
+                // 抑制期间（按键录制中）只吞不切换，避免录制时弹出切换器
+                if (IsSuppressed && IsSwitcherActive?.Invoke() != true)
+                    return (IntPtr)1;
+
                 // 自愈：若钩子曾错过 Alt 松开（系统超时踢出钩链、安全桌面切换等），
                 // _altDown 会粘滞为 true；这里用 GetAsyncKeyState 读真实物理状态校验，不一致则复位。
                 if ((GetAsyncKeyState(VK_MENU) & 0x8000) == 0)

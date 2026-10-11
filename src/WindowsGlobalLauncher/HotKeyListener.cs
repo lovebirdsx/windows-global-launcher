@@ -35,7 +35,12 @@ namespace CommandLauncher
             _window.CreateHandle(new CreateParams());
         }
 
-        public bool RegisterHotKey(string hotKeyString)
+        /// <summary>
+        /// 注册全局热键。
+        /// </summary>
+        /// <param name="silent">静默模式：不写日志。供快捷键设置窗口探测组合键是否被其它程序占用，
+        /// 探测失败是正常结果，不应在日志里留下 ERROR。</param>
+        public bool RegisterHotKey(string hotKeyString, bool silent = false)
         {
             try
             {
@@ -60,16 +65,19 @@ namespace CommandLauncher
                 bool result = RegisterHotKey(_window.Handle, HOTKEY_ID, modifiers, (uint)virtualKey);
                 if (!result)
                 {
-                    Logger.LogError($"注册热键失败: {hotKeyString}", new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+                    if (!silent)
+                        Logger.LogError($"注册热键失败: {hotKeyString}", new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
                     return false;
                 }
 
-                Logger.LogInfo($"成功注册热键: {hotKeyString}");
+                if (!silent)
+                    Logger.LogInfo($"成功注册热键: {hotKeyString}");
                 return true;
             }
             catch (Exception ex)
             {
-                Logger.LogError($"注册热键异常: {hotKeyString}", ex);
+                if (!silent)
+                    Logger.LogError($"注册热键异常: {hotKeyString}", ex);
                 return false;
             }
         }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Windows.Threading;
 
 namespace CommandLauncher
 {
@@ -86,6 +87,12 @@ namespace CommandLauncher
         private const int VK_DELETE = 0x2E;
         private const int VK_LWIN = 0x5B;
         private const int VK_RWIN = 0x5C;
+        private const int VK_LSHIFT = 0xA0;
+        private const int VK_RSHIFT = 0xA1;
+        private const int VK_LCONTROL = 0xA2;
+        private const int VK_RCONTROL = 0xA3;
+        private const int VK_LMENU = 0xA4;
+        private const int VK_RMENU = 0xA5;
 
         #endregion
 
@@ -130,6 +137,140 @@ namespace CommandLauncher
             RefreshInstallState();
         }
 
+        #region 按键录制（快捷键设置窗口用）
+
+        private Action<int, bool, bool, bool, bool>? _recordingCallback;
+
+        // 录制期间仍处于按下状态的非修饰键（keydown 时不存在才回调，用于抑制自动重复）
+        private readonly HashSet<int> _recordingDownKeys = [];
+
+        // 录制期间各修饰键族（Shift/Ctrl/Alt/Win）按下的物理键数量（左右变体分别计数）
+        private readonly Dictionary<int, int> _recordingModifierHeld = [];
+
+        /// <summary>是否处于按键录制模式。</summary>
+        public bool IsRecordingKey => _recordingCallback != null;
+
+        /// <summary>
+        /// 进入按键录制模式：此后所有非注入按键（含 keyup，避免前台收到不配对的松键）都被吞掉，
+        /// 非修饰键的首次按下以 (vk, ctrl, alt, shift, win) 回调给订阅方；录制期间不触发动作绑定。
+        /// <para>
+        /// 回调运行在钩子线程（UI 线程）内、钩子栈上：订阅方必须只做 Dispatcher.BeginInvoke 转发，
+        /// 绝不能在回调里同步调用 <see cref="EndKeyRecording"/>——那会触发钩子卸载/重装，属重入风险。
+        /// </para>
+        /// </summary>
+        public void BeginKeyRecording(Action<int, bool, bool, bool, bool> onKeyDown)
+        {
+            _recordingCallback = onKeyDown ?? throw new ArgumentNullException(nameof(onKeyDown));
+            _recordingDownKeys.Clear();
+
+            // 快照播种：用户可能先按住修饰键再点「录制」，此时钩子还没见过这些按下事件
+            _recordingModifierHeld.Clear();
+            SeedModifierSnapshot();
+
+            RefreshInstallState();
+            Logger.LogInfo("键盘钩子进入按键录制模式（所有按键将被吞掉）");
+        }
+
+        /// <summary>退出按键录制模式，恢复正常热键判定。须在 UI 线程、且不在钩子回调栈上调用。</summary>
+        public void EndKeyRecording()
+        {
+            if (_recordingCallback == null)
+                return;
+
+            _recordingCallback = null;
+            _recordingDownKeys.Clear();
+            _recordingModifierHeld.Clear();
+            RefreshInstallState();
+            Logger.LogInfo("键盘钩子退出按键录制模式");
+        }
+
+        private void SeedModifierSnapshot()
+        {
+            CountModifierIfPressed(VK_LSHIFT);
+            CountModifierIfPressed(VK_RSHIFT);
+            CountModifierIfPressed(VK_LCONTROL);
+            CountModifierIfPressed(VK_RCONTROL);
+            CountModifierIfPressed(VK_LMENU);
+            CountModifierIfPressed(VK_RMENU);
+            CountModifierIfPressed(VK_LWIN);
+            CountModifierIfPressed(VK_RWIN);
+        }
+
+        private void CountModifierIfPressed(int vk)
+        {
+            if (IsKeyPressed(vk))
+                AddModifierHeld(vk);
+        }
+
+        /// <summary>把修饰键的左右变体/通用码归一到族码（Shift/Ctrl/Alt/Win）；非修饰键返回 0。</summary>
+        private static int ModifierFamily(int vk) => vk switch
+        {
+            VK_SHIFT or VK_LSHIFT or VK_RSHIFT => VK_SHIFT,
+            VK_CONTROL or VK_LCONTROL or VK_RCONTROL => VK_CONTROL,
+            VK_MENU or VK_LMENU or VK_RMENU => VK_MENU,
+            VK_LWIN or VK_RWIN => VK_LWIN,
+            _ => 0,
+        };
+
+        private void AddModifierHeld(int vk)
+        {
+            int family = ModifierFamily(vk);
+            _recordingModifierHeld[family] = _recordingModifierHeld.GetValueOrDefault(family) + 1;
+        }
+
+        private void ReleaseModifierHeld(int vk)
+        {
+            int family = ModifierFamily(vk);
+            int count = _recordingModifierHeld.GetValueOrDefault(family) - 1;
+            if (count > 0)
+                _recordingModifierHeld[family] = count;
+            else
+                _recordingModifierHeld.Remove(family);
+        }
+
+        private bool IsModifierHeld(int family) => _recordingModifierHeld.GetValueOrDefault(family) > 0;
+
+        /// <summary>录制模式下的按键处理：更新按下状态，非修饰键首次按下时回调。调用方负责吞键。</summary>
+        private void HandleRecordingEvent(int vk, bool isKeyDown)
+        {
+            if (ModifierFamily(vk) != 0)
+            {
+                if (isKeyDown)
+                    AddModifierHeld(vk);
+                else
+                    ReleaseModifierHeld(vk);
+                return; // 修饰键本身不是录制对象
+            }
+
+            if (isKeyDown)
+            {
+                // 自动重复：同一主键未松开前重复的 keydown 直接忽略
+                if (!_recordingDownKeys.Add(vk))
+                    return;
+
+                try
+                {
+                    _recordingCallback?.Invoke(vk,
+                        IsModifierHeld(VK_CONTROL),
+                        IsModifierHeld(VK_MENU),
+                        IsModifierHeld(VK_SHIFT),
+                        IsModifierHeld(VK_LWIN));
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError("按键录制回调异常，已自动结束录制", ex);
+                    // 不能在钩子栈上同步卸载钩子，延迟到 dispatcher 上下文执行
+                    Dispatcher.CurrentDispatcher.BeginInvoke(new Action(EndKeyRecording));
+                }
+            }
+            else
+            {
+                _recordingDownKeys.Remove(vk);
+            }
+        }
+
+        #endregion
+
         private readonly LowLevelKeyboardProc _proc; // 字段强引用，防止委托被 GC 回收
         private IntPtr _hookId = IntPtr.Zero;
         private bool _disposed;
@@ -151,10 +292,11 @@ namespace CommandLauncher
                 Logger.LogInfo("键盘钩子安装成功");
         }
 
-        /// <summary>条件安装/卸载：有动作绑定或选中态守卫时安装，否则卸载，缩短全局钩链。</summary>
+        /// <summary>条件安装/卸载：有动作绑定、录制态或选中态守卫时安装，否则卸载，缩短全局钩链。</summary>
         private void RefreshInstallState()
         {
             bool needHook = _actionBindings.Count > 0
+                || _recordingCallback != null
                 || ShouldCancelSelectionOnEscape != null
                 || ShouldDeleteSelection != null;
 
@@ -184,6 +326,14 @@ namespace CommandLauncher
                 // 不参与任何判定：注入序列若参与绑定匹配会命中用户自定义绑定造成递归/误触发。
                 if ((data.flags & 0x10u) != 0) // LLKHF_INJECTED
                     return CallNextHookEx(_hookId, nCode, wParam, lParam);
+
+                // 按键录制模式：吞掉一切非注入按键（含 keyup），只把非修饰键的首次按下回调出去。
+                // 必须放在动作绑定匹配之前：否则录制时按到已有绑定的组合会真的触发动作。
+                if (_recordingCallback != null)
+                {
+                    HandleRecordingEvent(vk, isKeyDown);
+                    return (IntPtr)1;
+                }
 
                 // 可配置的动作热键（如 Alt+Q 关闭前台窗口）：修饰键精确匹配，命中即吞掉
                 if (isKeyDown && _actionBindings.Count > 0)
@@ -239,6 +389,11 @@ namespace CommandLauncher
         {
             if (_disposed)
                 return;
+
+            // 兜底：进程退出/钩子释放时录制态不得残留
+            _recordingCallback = null;
+            _recordingDownKeys.Clear();
+            _recordingModifierHeld.Clear();
 
             if (_hookId != IntPtr.Zero)
             {

@@ -12,6 +12,7 @@
 
 * 模糊搜索,按使用频率(执行次数 / 最近使用)排序
 * 每条命令可单独配置热键,窗口弹出后即可直接触发
+* 命令面板唤出热键与全部命令热键都可在快捷键设置窗口（命令面板输入 `hotkeys` 或托盘菜单「快捷键设置」）里可视化录制修改
 * 列表中会显示命令的执行次数与上次执行时间
 * 程序虽以管理员权限运行,但启动的命令默认降权为**普通用户权限**(等同桌面双击),避免权限污染;如需以管理员启动可对单条命令设置 `"RunAsAdmin": true`
 
@@ -25,7 +26,7 @@
 
 ### 剪贴板历史
 
-后台记录系统所有复制操作（文本 + 图片），默认热键 `Ctrl+Alt+C` 唤出（可在 `WindowActions` 段改绑）。
+后台记录系统所有复制操作（文本 + 图片），默认热键 `Ctrl+Alt+C` 唤出（可在 `WindowActions` 段改绑，或经快捷键设置窗口可视化修改）。
 
 * 按时间倒序保留最近 1000 条，重复内容自动置顶去重，重启不丢（持久化在数据目录）
 * 窗口在当前输入光标位置弹出（取不到光标时回退到鼠标所在屏幕居中），失焦自动关闭
@@ -35,7 +36,7 @@
 
 ### 截图与贴图
 
-Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F7`，均可在 `WindowActions` 段改绑）。完整支持多显示器与混合 DPI（PerMonitorV2），截图像素精确。
+Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F7`，均可在 `WindowActions` 段改绑，或经快捷键设置窗口可视化修改）。完整支持多显示器与混合 DPI（PerMonitorV2），截图像素精确。
 
 **截图（`F4`）**：冻结全屏后进入框选——
 
@@ -58,7 +59,7 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 * 鼠标悬停时贴图阴影浮起（不再变蓝描边，便签分类色描边保持不变）
 * 贴图与文字便签重启后自动恢复：退出时仍打开的贴图按原位置/缩放/透明度/分类/内容全部恢复（整体隐藏状态不记忆，恢复后直接显示）；被关闭的贴图不恢复
 
-> 注意:默认热键是无修饰键的 `F4`/`F7`,命中后按键被全局吞掉——Excel 的 `F4`(重复上一操作/切换绝对引用)等应用内同名快捷键会失效。介意的话在配置中改绑其它组合键即可。
+> 注意:默认热键是无修饰键的 `F4`/`F7`,命中后按键被全局吞掉——Excel 的 `F4`(重复上一操作/切换绝对引用)等应用内同名快捷键会失效。介意的话在快捷键设置窗口（`hotkeys`）或配置中改绑其它组合键即可。
 
 ### 护眼模式
 
@@ -85,7 +86,7 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 
 ### 窗口动作热键
 
-全局生效的热键，在配置文件的 `WindowActions` 段自定义，修改配置后自动热更新。默认绑定：
+全局生效的热键，在配置文件的 `WindowActions` 段自定义，修改配置后自动热更新；更推荐用可视化界面修改——命令面板输入 `hotkeys` 或托盘菜单「快捷键设置」。默认绑定：
 
 | 热键             | 动作                   | 说明                                                                             |
 | ---------------- | ---------------------- | -------------------------------------------------------------------------------- |
@@ -99,6 +100,21 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 | `Shift+F7`       | `TogglePinVisibility`  | 隐藏/显示所有贴图（图片贴图与文字便签）                                          |
 | `Win+Q`          | `PinBoxSelect`         | 框选多张贴图后整体移动（拖橡皮筋框选，拖动任一选中贴图整体移动；点击空白/`Esc` 取消选中，点击单个贴图改为只选中它，`Del` 删除选中贴图） |
 | `Ctrl+Alt+Enter` | `ShowContextMenu`      | 模拟 `Shift+F10` 弹出右键菜单                                                    |
+| 未绑定           | `EyeCareNormal`        | 护眼模式：正常（关闭护眼颜色效果）                                               |
+| 未绑定           | `EyeCareOffice`        | 护眼模式：办公                                                                   |
+| 未绑定           | `OpenHotkeySettings`   | 打开快捷键设置窗口                                                               |
+
+### 快捷键设置（可视化）
+
+命令面板输入 `hotkeys`（或托盘菜单「快捷键设置」）打开设置窗口，可视化修改**全部三类热键**：命令面板唤出热键、窗口动作热键、每条命令的触发热键。
+
+* **录制**：点击某行的热键框 → 按下新的组合键即完成设置，改动**即时生效**（无需重启，也无需点保存）。
+* **清除**：录制中按 `Backspace`/`Delete`，或点该行的「清除」；命令面板热键不允许清除。
+* **取消**：录制中按 `Esc`（窗口失焦或 15 秒无输入也会自动取消）。
+* **可用按键**：`Ctrl`/`Alt`/`Shift`/`Win` + 字母/数字/`F1`-`F12`/方向键/`Home`/`End`/`PgUp`/`PgDn`/`Insert`/`Delete`/`Backspace`/常用标点（`-` `=` `[` `]` `\` `;` `'` `,` `.` `/` `` ` ``）。
+* **限制**：命令面板热键必须含至少一个修饰键，且保存前会检测是否已被其它程序占用；窗口动作与命令热键允许不带修饰键，但只支持 `F1`-`F12`（避免裸键全局吞掉普通输入）；系统保留组合（`Alt+Tab`、`Ctrl+Alt+Del`、`Ctrl+Shift+Esc`、`Win+L`）不可设置。
+* **冲突**：与其它热键重复时对应行会标黄并给出说明（配置本身允许重复，仍会保存）；勾掉窗口动作行的「启用」可临时停用该热键而保留绑定。
+* **恢复默认**：底部的「恢复默认」重置命令面板热键与窗口动作热键（命令热键不受影响）。
 
 ## 安装
 
@@ -133,14 +149,16 @@ Get-FileHash WindowsGlobalLauncher-vX.Y.Z-win-x64.zip -Algorithm SHA256
 
 在搜索框输入以下内置命令可直接操作:
 
-| 命令        | 说明                |
-| ----------- | ------------------- |
-| `config`    | 打开配置文件        |
-| `setconfig` | 选择 / 切换配置文件 |
-| `logs`      | 查看日志            |
-| `update`    | 检查更新            |
-| `autostart` | 切换开机自动启动    |
-| `exit`      | 退出程序            |
+| 命令        | 说明                        |
+| ----------- | --------------------------- |
+| `config`    | 打开配置文件                |
+| `setconfig` | 选择 / 切换配置文件         |
+| `hotkeys`   | 打开快捷键设置（可视化改键） |
+| `logs`      | 查看日志                    |
+| `update`    | 检查更新                    |
+| `autostart` | 切换开机自动启动            |
+| `help`      | 打开帮助文档                |
+| `exit`      | 退出程序                    |
 
 ### 配置文件示例
 
@@ -158,7 +176,10 @@ Get-FileHash WindowsGlobalLauncher-vX.Y.Z-win-x64.zip -Algorithm SHA256
     { "Action": "PinClipboard", "HotKey": "F7", "Enabled": true },
     { "Action": "TogglePinVisibility", "HotKey": "Shift+F7", "Enabled": true },
     { "Action": "PinBoxSelect", "HotKey": "Win+Q", "Enabled": true },
-    { "Action": "ShowContextMenu", "HotKey": "Ctrl+Alt+Enter", "Enabled": true }
+    { "Action": "ShowContextMenu", "HotKey": "Ctrl+Alt+Enter", "Enabled": true },
+    { "Action": "EyeCareNormal", "HotKey": "", "Enabled": true },
+    { "Action": "EyeCareOffice", "HotKey": "", "Enabled": true },
+    { "Action": "OpenHotkeySettings", "HotKey": "", "Enabled": true }
   ],
   "Commands": [
     {
@@ -174,7 +195,9 @@ Get-FileHash WindowsGlobalLauncher-vX.Y.Z-win-x64.zip -Algorithm SHA256
 
 > `RunAsAdmin` 可选,默认 `false`:命令以普通用户权限启动(借用桌面 Shell 令牌降权)。设为 `true` 则保留管理员权限启动。降权失败(如 explorer 未运行)时会报错且不启动该命令。
 
-> `WindowActions` 可选,缺省时补默认绑定。`Action` 当前可用值:`CloseWindow`(关闭前台窗口)、`VolumeUp`/`VolumeDown`(增大/减小系统音量)、`ToggleMute`(切换静音)、`ShowClipboardHistory`(剪贴板历史)、`Screenshot`(区域截图)、`PinClipboard`(把剪贴板内容钉为屏幕贴图：图片优先，无图片有文字则钉为便签)、`TogglePinVisibility`(隐藏/显示所有贴图)、`PinBoxSelect`(框选贴图整体移动)、`ShowContextMenu`(模拟 `Shift+F10` 弹出右键菜单);`Enabled` 设为 `false` 可临时停用某条绑定。修饰键为精确匹配(如配置 `Alt+Q` 时 `Alt+Shift+Q` 不会触发)。
+> `WindowActions` 可选,缺省时补默认绑定。`Action` 当前可用值:`CloseWindow`(关闭前台窗口)、`VolumeUp`/`VolumeDown`(增大/减小系统音量)、`ToggleMute`(切换静音)、`ShowClipboardHistory`(剪贴板历史)、`Screenshot`(区域截图)、`PinClipboard`(把剪贴板内容钉为屏幕贴图：图片优先，无图片有文字则钉为便签)、`TogglePinVisibility`(隐藏/显示所有贴图)、`PinBoxSelect`(框选贴图整体移动)、`ShowContextMenu`(模拟 `Shift+F10` 弹出右键菜单)、`EyeCareNormal`/`EyeCareOffice`(护眼模式：正常/办公)、`OpenHotkeySettings`(打开快捷键设置)；`HotKey` 为空表示该动作不绑定热键(护眼模式等新增动作默认如此)；`Enabled` 设为 `false` 可临时停用某条绑定。修饰键为精确匹配(如配置 `Alt+Q` 时 `Alt+Shift+Q` 不会触发)。
+
+> 热键语法：`Ctrl`/`Alt`/`Shift`/`Win` + 主键，主键支持字母、数字、`F1`-`F12`、`Esc`/`Enter`/`Space`/`Tab`、`Up`/`Down`/`Left`/`Right`、`Home`/`End`/`PageUp`/`PageDown`/`Insert`/`Delete`/`Backspace` 与常用标点。以上三类热键都可在快捷键设置窗口（`hotkeys`）里录制修改，无需手写配置。
 
 ## 开发
 

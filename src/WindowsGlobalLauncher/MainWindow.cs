@@ -137,7 +137,7 @@ namespace CommandLauncher
         /// <summary>帮助文档（GitHub README）URL。</summary>
         private const string HelpPageUrl = "https://github.com/lovebirdsx/windows-global-launcher";
 
-        private static readonly string[] AppCommands = ["config", "setconfig", "logs", "update", "autostart", "exit", "help"];
+        private static readonly string[] AppCommands = ["config", "setconfig", "logs", "update", "autostart", "exit", "help", "hotkeys"];
 
         private readonly ObservableCollection<Command> _filteredCommands = [];
         private readonly HotKeyListener _hotKeyListener = new();
@@ -145,6 +145,13 @@ namespace CommandLauncher
         private readonly string _configPath;
         private int _selectedIndex = 0;
         private bool _disposed = false;
+
+        /// <summary>
+        /// 最近一次尝试注册的命令面板热键串（配置里的原始串）。
+        /// 配置重载时若该串未变则跳过「注销 + 重注册」——设置窗口每改一项都会触发全量重载，
+        /// 不跳过会造成无谓的热键瞬断、日志噪音与注册失败时的气泡重复弹出。
+        /// </summary>
+        private string? _lastAttemptedHotKey;
 
         /// <summary>
         /// 开机自启是否已开启的缓存值。
@@ -485,6 +492,7 @@ namespace CommandLauncher
                 var autoStartItem = new System.Windows.Forms.ToolStripMenuItem("开机自动启动") { CheckOnClick = false };
                 autoStartItem.Click += (s, e) => ToggleAutoStart();
                 contextMenu.Items.Add(autoStartItem);
+                contextMenu.Items.Add("快捷键设置", null, (s, e) => HotkeySettingsWindow.ShowFor());
                 contextMenu.Items.Add("设定配置文件", null, (s, e) => AppConfig.SetConfigFile());
                 contextMenu.Items.Add("打开配置文件", null, (s, e) => AppConfig.OpenConfigFile());
                 contextMenu.Items.Add("打开日志文件", null, (s, e) => Logger.OpenLogFile());
@@ -577,6 +585,11 @@ namespace CommandLauncher
             {
                 Application.Current.Dispatcher.Invoke(() =>
                 {
+                    // 配置重载很频繁（快捷键设置窗口每改一项都会全量写回并重载），
+                    // 热键串没变时跳过「注销 + 重注册」，避免无谓的瞬断、日志噪音与失败气泡重复弹出
+                    if (string.Equals(_lastAttemptedHotKey, AppConfig.Instance.Config.HotKey, StringComparison.OrdinalIgnoreCase))
+                        return;
+
                     _hotKeyListener.UnregisterHotKey();
                     RegisterLauncherHotKey(isReload: true);
                 });
@@ -596,6 +609,7 @@ namespace CommandLauncher
         {
             string prefix = isReload ? "重新注册热键失败" : "注册热键失败";
             var hotKey = AppConfig.Instance.Config.HotKey;
+            _lastAttemptedHotKey = hotKey; // 记录本次尝试的串，配置重载时据此跳过无变化的重注册
 
             if (_hotKeyListener.RegisterHotKey(hotKey))
                 return;
@@ -820,6 +834,15 @@ namespace CommandLauncher
                 ExecuteCount = AppState.Instance.GetCommandExecuteCount("help")
             });
 
+            commands.Add(new Command
+            {
+                Name = "hotkeys",
+                Description = "打开快捷键设置（自定义全局热键与命令热键）",
+                Shell = "hotkeys",
+                LastExecuted = AppState.Instance.GetCommandLastExecutedTime("hotkeys"),
+                ExecuteCount = AppState.Instance.GetCommandExecuteCount("hotkeys")
+            });
+
             // 注入护眼模式内置命令（护眼：xxx），由 ExecuteAppCommand 特殊处理
             foreach (var mode in EyeCareManager.Modes)
             {
@@ -955,12 +978,27 @@ namespace CommandLauncher
             if (string.IsNullOrWhiteSpace(hotKey))
                 return false;
 
+            // Alt 组合键在 WPF 里 e.Key == Key.System，真实主键在 e.SystemKey
+            Key actualKey = e.Key == Key.System ? e.SystemKey : e.Key;
+            var modifiers = e.KeyboardDevice.Modifiers;
+
+            // 统一走 HotKeyParser（与全局热键同一套语法，支持方向键/标点等）；
+            // 解析失败再回退 KeyGestureConverter，兼容旧配置里的 KeyGesture 专属写法（如 "Ctrl+D1"）
+            if (HotKeyParser.TryParse(hotKey, out int parsedVk, out bool ctrl, out bool alt, out bool shift, out bool win))
+            {
+                int virtualKey = KeyInterop.VirtualKeyFromKey(actualKey);
+                return virtualKey == parsedVk
+                    && ((modifiers & ModifierKeys.Control) != 0) == ctrl
+                    && ((modifiers & ModifierKeys.Alt) != 0) == alt
+                    && ((modifiers & ModifierKeys.Shift) != 0) == shift
+                    && ((modifiers & ModifierKeys.Windows) != 0) == win;
+            }
+
             try
             {
                 if (new KeyGestureConverter().ConvertFromString(hotKey) is KeyGesture gesture)
                 {
-                    Key actualKey = e.Key == Key.System ? e.SystemKey : e.Key;
-                    return actualKey == gesture.Key && e.KeyboardDevice.Modifiers == gesture.Modifiers;
+                    return actualKey == gesture.Key && modifiers == gesture.Modifiers;
                 }
             }
             catch
@@ -1022,6 +1060,12 @@ namespace CommandLauncher
                 else if (selectedCommand.Name == "help")
                 {
                     OpenHelpDocument();
+                }
+                else if (selectedCommand.Name == "hotkeys")
+                {
+                    // 延迟到本次输入处理完成、命令面板隐藏之后再显示设置窗：
+                    // ExecuteCommand 的顺序是先执行再 HideWindow，同步 Show 会出现前台交接抖动
+                    Dispatcher.BeginInvoke(new Action(HotkeySettingsWindow.ShowFor));
                 }
                 return true;
             }

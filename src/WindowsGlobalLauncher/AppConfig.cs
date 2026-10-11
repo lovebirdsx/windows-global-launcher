@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Windows;
 
@@ -39,7 +41,8 @@ namespace CommandLauncher
     {
         public static readonly string DefaultHotKey = "Ctrl+Shift+I";
 
-        /// <summary>默认的窗口动作热键（LoadConfig 兼容旧配置与 CreateDefaultConfig 共用）。</summary>
+        /// <summary>默认的窗口动作热键（LoadConfig 兼容旧配置与 CreateDefaultConfig 共用）。
+        /// 恒为每个注册动作给出一条绑定；不需要默认热键的新动作（如护眼模式）用空字符串表示「默认不绑定」。</summary>
         public static List<ConfigWindowAction> DefaultWindowActions() =>
         [
             new() { Action = "CloseWindow", HotKey = "Alt+Q" },
@@ -52,6 +55,9 @@ namespace CommandLauncher
             new() { Action = "TogglePinVisibility", HotKey = "Shift+F7" },
             new() { Action = "PinBoxSelect", HotKey = "Win+Q" },
             new() { Action = "ShowContextMenu", HotKey = "Ctrl+Alt+Enter" },
+            new() { Action = "EyeCareNormal", HotKey = "" },
+            new() { Action = "EyeCareOffice", HotKey = "" },
+            new() { Action = "OpenHotkeySettings", HotKey = "" },
         ];
         public static string ConfigPath
         {
@@ -145,7 +151,20 @@ namespace CommandLauncher
 
         private FileSystemWatcher? _fileWatcher;
         private DateTime _lastWriteTime = DateTime.MinValue;
-        
+
+        // 自身写盘后的 watcher 回声抑制窗口（Environment.TickCount64 毫秒刻度）。
+        // SaveConfig 写盘前设置，OnConfigFileChanged 在其内直接忽略：写盘后再更新时间戳存在竞态
+        // （watcher 线程可能在时间戳更新前就完成判定），提前设时间窗更可靠。
+        // 只吞自己写入的回声；窗口内（1 秒）的外部改动理论上会被漏过一次，窗口极小，可接受。
+        private long _suppressWatcherReloadUntil;
+
+        /// <summary>反序列化配置的统一选项（LoadConfig 与 SaveConfig 写盘前自检共用）。</summary>
+        private static readonly JsonSerializerOptions LoadOptions = new()
+        {
+            ReadCommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true
+        };
+
         // 配置更新事件
         public event Action? ConfigUpdated;
 
@@ -161,12 +180,14 @@ namespace CommandLauncher
                 if (File.Exists(ConfigPath))
                 {
                     var json = File.ReadAllText(ConfigPath);
-                    var options = new JsonSerializerOptions
+                    var config = JsonSerializer.Deserialize<Config>(json, LoadOptions) ?? throw new JsonException("反序列化配置文件失败");
+                    // 字段兜底：缺字段或显式写 null 都会走到这里，避免后续 NRE 与空热键
+                    config.Commands ??= [];
+                    if (string.IsNullOrWhiteSpace(config.HotKey))
                     {
-                        ReadCommentHandling = JsonCommentHandling.Skip,
-                        AllowTrailingCommas = true
-                    };
-                    var config = JsonSerializer.Deserialize<Config>(json, options) ?? throw new JsonException("反序列化配置文件失败");
+                        Logger.LogInfo($"配置中的命令面板热键为空，回退为默认热键 {DefaultHotKey}");
+                        config.HotKey = DefaultHotKey;
+                    }
                     // 向后兼容：旧配置文件没有 WindowActions 段时，补默认绑定，行为不回归
                     if (config.WindowActions == null || config.WindowActions.Count == 0)
                         config.WindowActions = DefaultWindowActions();
@@ -184,9 +205,16 @@ namespace CommandLauncher
                         config.WindowActions.Add(new() { Action = "PinBoxSelect", HotKey = "Win+Q" });
                     if (!config.WindowActions.Any(a => string.Equals(a.Action, "ShowContextMenu", StringComparison.OrdinalIgnoreCase)))
                         config.WindowActions.Add(new() { Action = "ShowContextMenu", HotKey = "Ctrl+Alt+Enter" });
+                    // 后续新增的「默认不绑定」动作：补齐条目（空热键），让配置文件保持自解释、设置窗口开箱可见
+                    if (!config.WindowActions.Any(a => string.Equals(a.Action, "EyeCareNormal", StringComparison.OrdinalIgnoreCase)))
+                        config.WindowActions.Add(new() { Action = "EyeCareNormal", HotKey = "" });
+                    if (!config.WindowActions.Any(a => string.Equals(a.Action, "EyeCareOffice", StringComparison.OrdinalIgnoreCase)))
+                        config.WindowActions.Add(new() { Action = "EyeCareOffice", HotKey = "" });
+                    if (!config.WindowActions.Any(a => string.Equals(a.Action, "OpenHotkeySettings", StringComparison.OrdinalIgnoreCase)))
+                        config.WindowActions.Add(new() { Action = "OpenHotkeySettings", HotKey = "" });
                     _config = config;
                     Logger.LogInfo($"成功加载配置文件，包含 {config.Commands.Count} 个命令");
-                    
+
                     // 触发配置更新事件
                     ConfigUpdated?.Invoke();
                 }
@@ -198,8 +226,12 @@ namespace CommandLauncher
             }
             catch (Exception ex)
             {
-                Logger.LogError("加载配置文件失败，使用默认配置", ex);
-                CreateDefaultConfig();
+                // 解析/读取失败时刻意不覆写用户文件：旧行为是直接 CreateDefaultConfig 覆盖，
+                // 一旦文件里有一个笔误（或写入方拼出非法 JSON），用户的全部配置就被清空。
+                // 现在只在内存里退回默认值继续运行，文件原样保留供用户修复。
+                Logger.LogError("加载配置文件失败，已保留原文件，本次以内存中的默认值运行（请检查配置文件格式）", ex);
+                if (_config.WindowActions.Count == 0)
+                    _config.WindowActions = DefaultWindowActions();
             }
         }
 
@@ -265,6 +297,10 @@ namespace CommandLauncher
         {
             try
             {
+                // 自己写盘触发的回声：SaveConfig 写盘前置的抑制时间窗内直接忽略
+                if (Environment.TickCount64 < _suppressWatcherReloadUntil)
+                    return;
+
                 // 防止重复触发
                 var lastWrite = File.GetLastWriteTime(ConfigPath);
                 if (lastWrite <= _lastWriteTime.AddMilliseconds(100))
@@ -289,73 +325,109 @@ namespace CommandLauncher
             LoadConfig();
         }
 
+        /// <summary>
+        /// 保存配置并立即重新加载生效（快捷键设置窗口等 UI 修改后调用）。
+        /// 保存失败不重载：避免界面显示出「已生效」而实际未写入的状态。
+        /// </summary>
+        public bool SaveAndReload()
+        {
+            if (!SaveConfig())
+                return false;
+
+            ReloadConfig();
+            return true;
+        }
+
         public static void RestartFileWatcher()
         {
             Instance.StopFileWatcher();
             Instance.StartFileWatcher();
         }
 
-        private void SaveConfig()
+        /// <summary>
+        /// 把配置对象拼装成带注释的 JSON 文本（纯静态，便于单测）。
+        /// 保持手写注释格式便于用户直接编辑；所有字符串值经 JsonSerializer 转义——
+        /// 旧版直接字符串拼插，Shell/名称里出现反斜杠（如 C:\Program Files\x.exe）或引号会写出非法 JSON，
+        /// 下次加载解析失败会走「解析失败」分支导致配置丢失。
+        /// </summary>
+        public static string ComposeConfigJson(Config config)
+        {
+            var stringOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+            string Str(string? value) => JsonSerializer.Serialize(value ?? "", stringOptions);
+
+            var sb = new StringBuilder();
+            sb.Append(@"{
+  // 最大显示条目数
+  ""MaxDisplayItems"": ").Append(config.MaxDisplayItems).Append(@",
+  // 全局热键配置 (支持: Ctrl, Alt, Shift, Win 修饰键 + 字母/数字/F1-F12/方向键/编辑键/常用标点)
+  // 示例: ""Ctrl+Space"", ""Alt+R"", ""Win+L""；命令面板执行 hotkeys 可打开快捷键设置窗口可视化修改
+  ""HotKey"": ").Append(Str(config.HotKey)).Append(@",
+  // 窗口动作热键（全局生效；HotKey 为空表示不绑定该动作）
+  // 可用 Action: ""CloseWindow""(关闭前台窗口，等同 Alt+F4) / ""VolumeUp""(增大音量) / ""VolumeDown""(减小音量) / ""ToggleMute""(切换静音) / ""ShowClipboardHistory""(剪贴板历史) / ""Screenshot""(区域截图) / ""PinClipboard""(把剪贴板图片钉为屏幕贴图) / ""TogglePinVisibility""(隐藏/显示所有贴图) / ""PinBoxSelect""(框选贴图整体移动) / ""ShowContextMenu""(模拟 Shift+F10 弹出右键菜单) / ""EyeCareNormal""(护眼：正常) / ""EyeCareOffice""(护眼：办公) / ""OpenHotkeySettings""(打开快捷键设置)
+  ""WindowActions"": [");
+
+            for (int i = 0; i < config.WindowActions.Count; i++)
+            {
+                var action = config.WindowActions[i];
+                sb.Append(@"
+    {
+      ""Action"": ").Append(Str(action.Action)).Append(@",
+      ""HotKey"": ").Append(Str(action.HotKey)).Append(@",
+      ""Enabled"": ").Append(action.Enabled ? "true" : "false").Append(@"
+    }");
+                if (i < config.WindowActions.Count - 1)
+                    sb.Append(',');
+            }
+
+            sb.Append(@"
+  ],
+  // 命令列表 (每个命令可选配置 HotKey；RunAsAdmin=true 时以管理员权限启动，默认 false 为普通用户权限)
+  ""Commands"": [");
+
+            for (int i = 0; i < config.Commands.Count; i++)
+            {
+                var cmd = config.Commands[i];
+                sb.Append(@"
+    {
+      ""Name"": ").Append(Str(cmd.Name)).Append(@",
+      ""Description"": ").Append(Str(cmd.Description)).Append(@",
+      ""Shell"": ").Append(Str(cmd.Shell)).Append(@",
+      ""HotKey"": ").Append(Str(cmd.HotKey)).Append(@",
+      ""RunAsAdmin"": ").Append(cmd.RunAsAdmin ? "true" : "false").Append(@"
+    }");
+                if (i < config.Commands.Count - 1)
+                    sb.Append(',');
+            }
+
+            sb.Append(@"
+  ]
+}");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 把当前配置写回配置文件。写盘前先用 LoadConfig 同款选项自检拼装结果，
+        /// 拼出非法 JSON 就放弃保存（宁可不存也不能让用户配置在下次加载时被判定为损坏）；失败返回 false。
+        /// </summary>
+        public bool SaveConfig()
         {
             try
             {
-                var options = new JsonSerializerOptions { WriteIndented = true };
-                var json = JsonSerializer.Serialize(_config, options);
-                
-                // 添加注释说明
-                var jsonWithComments = @"{
-  // 最大显示条目数
-  ""MaxDisplayItems"": " + _config.MaxDisplayItems + @",
-  // 全局热键配置 (支持: Ctrl, Alt, Shift, Win + 字母/数字/功能键)
-  // 示例: ""Ctrl+Space"", ""Alt+R"", ""Win+L""
-  ""HotKey"": """ + _config.HotKey + @""",
-  // 窗口动作热键（全局生效）
-  // 可用 Action: ""CloseWindow""(关闭前台窗口，等同 Alt+F4) / ""VolumeUp""(增大音量) / ""VolumeDown""(减小音量) / ""ToggleMute""(切换静音) / ""ShowClipboardHistory""(剪贴板历史) / ""Screenshot""(区域截图) / ""PinClipboard""(把剪贴板图片钉为屏幕贴图) / ""TogglePinVisibility""(隐藏/显示所有贴图) / ""PinBoxSelect""(框选贴图整体移动) / ""ShowContextMenu""(模拟 Shift+F10 弹出右键菜单)
-  ""WindowActions"": [";
+                var json = ComposeConfigJson(_config);
 
-                for (int i = 0; i < _config.WindowActions.Count; i++)
-                {
-                    var action = _config.WindowActions[i];
-                    jsonWithComments += $@"
-    {{
-      ""Action"": ""{action.Action}"",
-      ""HotKey"": ""{action.HotKey}"",
-      ""Enabled"": {(action.Enabled ? "true" : "false")}
-    }}";
-                    if (i < _config.WindowActions.Count - 1)
-                        jsonWithComments += ",";
-                }
+                // 写盘前自检：反序列化一遍，确保写出的一定能被 LoadConfig 读回来
+                _ = JsonSerializer.Deserialize<Config>(json, LoadOptions) ?? throw new JsonException("配置 JSON 自检反序列化为 null");
 
-                jsonWithComments += @"
-  ],
-  // 命令列表 (每个命令可选配置 HotKey；RunAsAdmin=true 时以管理员权限启动，默认 false 为普通用户权限)
-  ""Commands"": [";
-
-                for (int i = 0; i < _config.Commands.Count; i++)
-                {
-                    var cmd = _config.Commands[i];
-                    jsonWithComments += $@"
-    {{
-      ""Name"": ""{cmd.Name}"",
-      ""Description"": ""{cmd.Description}"",
-      ""Shell"": ""{cmd.Shell}"",
-      ""HotKey"": ""{cmd.HotKey}"",
-      ""RunAsAdmin"": {(cmd.RunAsAdmin ? "true" : "false")}
-    }}";
-                    if (i < _config.Commands.Count - 1)
-                        jsonWithComments += ",";
-                }
-
-                jsonWithComments += @"
-  ]
-}";
-                File.WriteAllText(ConfigPath, jsonWithComments);
+                _suppressWatcherReloadUntil = Environment.TickCount64 + 1000;
+                File.WriteAllText(ConfigPath, json);
+                _lastWriteTime = File.GetLastWriteTime(ConfigPath);
                 Logger.LogInfo("配置文件保存成功");
+                return true;
             }
             catch (Exception ex)
             {
                 Logger.LogError("保存配置文件失败", ex);
-                MessageBox.Show($"保存配置文件失败: {ex.Message}");
+                return false;
             }
         }
 

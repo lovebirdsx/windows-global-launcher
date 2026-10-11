@@ -56,6 +56,29 @@ namespace CommandLauncher
         private bool _isActive;
         private bool _disposed;
 
+        /// <summary>当前实例（快捷键设置窗口经它调用按键录制门面）；Dispose 后置空。</summary>
+        public static SwitcherWindow? Current { get; private set; }
+
+        /// <summary>
+        /// 进入按键录制模式（快捷键设置窗口用）：所有按键被钩子吞掉并回调给 onKeyDown，
+        /// 同时抑制 Alt+Tab 切换器。回调在钩子栈上执行，订阅方必须 Dispatcher.BeginInvoke 转发。
+        /// </summary>
+        public void BeginKeyRecording(Action<int, bool, bool, bool, bool> onKeyDown)
+        {
+            _altTabHook.IsSuppressed = true;
+            _hook.BeginKeyRecording(onKeyDown);
+        }
+
+        /// <summary>退出按键录制模式。须在 UI 线程、且不在钩子回调栈上调用（内部可能卸载/重装钩子）。</summary>
+        public void EndKeyRecording()
+        {
+            _hook.EndKeyRecording();
+            _altTabHook.IsSuppressed = false;
+        }
+
+        /// <summary>当前是否处于按键录制模式。</summary>
+        public bool IsRecordingKey => _hook.IsRecordingKey;
+
         /// <summary>窗口信息包装：后台补全标题/图标时通过 INotifyPropertyChanged 刷新 UI。</summary>
         private sealed class WindowEntry : System.ComponentModel.INotifyPropertyChanged
         {
@@ -142,6 +165,7 @@ namespace CommandLauncher
             ReloadActionBindings();
             AppConfig.Instance.ConfigUpdated += () => Dispatcher.Invoke(ReloadActionBindings);
 
+            Current = this;
             Logger.LogInfo("Alt+Tab 切换器初始化完成");
         }
 
@@ -157,13 +181,17 @@ namespace CommandLauncher
                 if (!item.Enabled)
                     continue;
 
+                // 空热键 = 该动作未绑定（如后补的护眼模式默认不绑定），静默跳过而非记警告
+                if (string.IsNullOrWhiteSpace(item.HotKey))
+                    continue;
+
                 if (!HotKeyParser.TryParse(item.HotKey, out int vk, out bool ctrl, out bool alt, out bool shift, out bool win))
                 {
                     Logger.LogWarning($"窗口动作热键解析失败，已跳过: {item.HotKey}");
                     continue;
                 }
 
-                if (!WindowActions.All.TryGetValue(item.Action, out var action))
+                if (!WindowActions.All.TryGetValue(item.Action, out var descriptor))
                 {
                     Logger.LogWarning($"未知窗口动作，已跳过: {item.Action}");
                     continue;
@@ -176,7 +204,7 @@ namespace CommandLauncher
                     Alt = alt,
                     Shift = shift,
                     Win = win,
-                    Callback = () => Dispatcher.BeginInvoke(action)
+                    Callback = () => Dispatcher.BeginInvoke(descriptor.Execute)
                 });
             }
             _hook.SetActionBindings(bindings);
@@ -556,6 +584,8 @@ namespace CommandLauncher
                 DeregisterShellHookWindow(hwnd);
             _altTabHook.Dispose();
             _hook.Dispose();
+            if (ReferenceEquals(Current, this))
+                Current = null;
             _disposed = true;
             GC.SuppressFinalize(this);
         }
