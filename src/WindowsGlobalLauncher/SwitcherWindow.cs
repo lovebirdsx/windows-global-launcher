@@ -160,10 +160,17 @@ namespace CommandLauncher
             _hook.CancelSelection = () => Dispatcher.BeginInvoke(PinWindow.CancelSelectionFromGlobal);
             _hook.ShouldDeleteSelection = () => !_isActive && PinWindow.IsAnySelected && !PinWindow.IsAnyEditing && !PinWindow.IsForegroundOwnedByThisProcess();
             _hook.DeleteSelection = () => Dispatcher.BeginInvoke(PinWindow.CloseSelected);
+            // 按键映射在切换器激活时整体让路：否则映射若含 Esc/方向键会吞掉 AltTabHook 的导航键
+            _hook.ShouldSkipKeyMapping = () => _isActive;
 
-            // 装配可配置的窗口动作热键（如 Alt+Q 关闭前台窗口），并跟随配置热更新
+            // 装配可配置的窗口动作热键（如 Alt+Q 关闭前台窗口）与按键映射方案，并跟随配置热更新
             ReloadActionBindings();
-            AppConfig.Instance.ConfigUpdated += () => Dispatcher.Invoke(ReloadActionBindings);
+            ReloadKeyMappings();
+            AppConfig.Instance.ConfigUpdated += () => Dispatcher.Invoke(() =>
+            {
+                ReloadActionBindings();
+                ReloadKeyMappings();
+            });
 
             Current = this;
             Logger.LogInfo("Alt+Tab 切换器初始化完成");
@@ -208,6 +215,27 @@ namespace CommandLauncher
                 });
             }
             _hook.SetActionBindings(bindings);
+        }
+
+        /// <summary>
+        /// 从配置重建按键映射方案表（启动时与配置热更新时调用，须在 UI 线程）。
+        /// 非法条目（带修饰键 / 源目标相同 / 源键重复 / 未知键）在 KeyMapping.BuildProfile 中
+        /// 跳过并记警告；全部条目无效的方案不生效。
+        /// </summary>
+        private void ReloadKeyMappings()
+        {
+            var profiles = new List<KeyMappingProfileRuntime>();
+            foreach (var item in AppConfig.Instance.Config.KeyMappingProfiles)
+            {
+                if (!item.Enabled)
+                    continue;
+
+                var runtime = KeyMapping.BuildProfile(item);
+                if (runtime != null)
+                    profiles.Add(runtime);
+            }
+
+            _hook.SetKeyMappings(profiles);
         }
 
         private static ListBox CreateList()

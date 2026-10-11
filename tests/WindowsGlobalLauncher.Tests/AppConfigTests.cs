@@ -54,11 +54,13 @@ namespace WindowsGlobalLauncher.Tests
             {
                 Commands = [new() { Name = "记事本", Description = "打开Windows记事本", Shell = "notepad.exe" }],
                 WindowActions = [new() { Action = "Screenshot", HotKey = "F4" }],
+                KeyMappingProfiles = [new() { Name = "星际争霸", Mappings = [new() { From = "Z", To = "F2" }] }],
             };
 
             var json = AppConfig.ComposeConfigJson(config);
 
             Assert.Contains("记事本", json);
+            Assert.Contains("星际争霸", json);
             Assert.Contains("\"Screenshot\"", json);
             Assert.DoesNotContain("\\u", json);
         }
@@ -110,10 +112,12 @@ namespace WindowsGlobalLauncher.Tests
                 HotKey = "Ctrl+Shift+I",
                 Commands = [],
                 WindowActions = [],
+                KeyMappingProfiles = [],
             });
 
             Assert.Empty(reloaded.Commands);
             Assert.Empty(reloaded.WindowActions);
+            Assert.Empty(reloaded.KeyMappingProfiles);
             Assert.Equal("Ctrl+Shift+I", reloaded.HotKey);
         }
 
@@ -130,6 +134,58 @@ namespace WindowsGlobalLauncher.Tests
             Assert.Equal("", reloaded.HotKey);
             Assert.Equal("", reloaded.WindowActions[0].HotKey);
             Assert.Equal("", reloaded.Commands[0].Name);
+        }
+
+        [Fact]
+        public void ComposeConfigJson_RoundTripsKeyMappingProfiles()
+        {
+            // 嵌套两层数组（方案 → 映射）的手写拼接往返：
+            // 顺序、中文名、启用状态、进程列表、空 Processes（全局）与空 Mappings 都必须保持
+            var config = new Config
+            {
+                KeyMappingProfiles =
+                [
+                    new()
+                    {
+                        Name = "星际争霸",
+                        Enabled = true,
+                        Processes = ["StarCraft.exe", "StarCraft1.exe"],
+                        Mappings =
+                        [
+                            new() { From = "Z", To = "F2" },
+                            new() { From = "X", To = "F3" },
+                        ],
+                    },
+                    new()
+                    {
+                        Name = "全局备用",
+                        Enabled = false,
+                        Processes = [],
+                        Mappings = [new() { From = "C", To = "F4" }],
+                    },
+                    new()
+                    {
+                        Name = "空方案",
+                        Processes = [],
+                        Mappings = [],
+                    },
+                ],
+            };
+
+            var reloaded = RoundTrip(config);
+
+            Assert.Equal(3, reloaded.KeyMappingProfiles.Count);
+            Assert.Equal("星际争霸", reloaded.KeyMappingProfiles[0].Name);
+            Assert.True(reloaded.KeyMappingProfiles[0].Enabled);
+            Assert.Equal(2, reloaded.KeyMappingProfiles[0].Processes.Count);
+            Assert.Equal("StarCraft.exe", reloaded.KeyMappingProfiles[0].Processes[0]);
+            Assert.Equal(2, reloaded.KeyMappingProfiles[0].Mappings.Count);
+            Assert.Equal("Z", reloaded.KeyMappingProfiles[0].Mappings[0].From);
+            Assert.Equal("F2", reloaded.KeyMappingProfiles[0].Mappings[0].To);
+            Assert.Equal("全局备用", reloaded.KeyMappingProfiles[1].Name);
+            Assert.False(reloaded.KeyMappingProfiles[1].Enabled);
+            Assert.Empty(reloaded.KeyMappingProfiles[1].Processes);
+            Assert.Empty(reloaded.KeyMappingProfiles[2].Mappings);
         }
     }
 }

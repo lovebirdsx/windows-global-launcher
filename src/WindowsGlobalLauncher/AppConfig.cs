@@ -28,6 +28,23 @@ namespace CommandLauncher
         public bool Enabled { get; set; } = true;
     }
 
+    // 按键映射方案：把源键替换为目标键（如 z→F2），仅当前台窗口属主的进程名命中 Processes 时生效
+    public class ConfigKeyMappingProfile
+    {
+        public string Name { get; set; } = "";
+        public bool Enabled { get; set; } = true;
+        // 进程白名单（不区分大小写）；为空表示全局生效（本程序自身窗口除外）
+        public List<string> Processes { get; set; } = [];
+        public List<ConfigKeyMapping> Mappings { get; set; } = [];
+    }
+
+    // 单条按键映射：From/To 均为单个主键名（语法同热键，但不允许带修饰键）
+    public class ConfigKeyMapping
+    {
+        public string From { get; set; } = "";
+        public string To { get; set; } = "";
+    }
+
     // 配置文件模型
     public class Config
     {
@@ -35,6 +52,7 @@ namespace CommandLauncher
         public string HotKey { get; set; } = AppConfig.DefaultHotKey;
         public List<ConfigCommand> Commands { get; set; } = [];
         public List<ConfigWindowAction> WindowActions { get; set; } = [];
+        public List<ConfigKeyMappingProfile> KeyMappingProfiles { get; set; } = [];
     }
 
     public class AppConfig
@@ -212,6 +230,14 @@ namespace CommandLauncher
                         config.WindowActions.Add(new() { Action = "EyeCareOffice", HotKey = "" });
                     if (!config.WindowActions.Any(a => string.Equals(a.Action, "OpenHotkeySettings", StringComparison.OrdinalIgnoreCase)))
                         config.WindowActions.Add(new() { Action = "OpenHotkeySettings", HotKey = "" });
+                    // 按键映射方案：缺失则为空表（默认无映射，不预置方案）；显式写 null 的列表/子列表逐项兜底
+                    config.KeyMappingProfiles ??= [];
+                    config.KeyMappingProfiles.RemoveAll(p => p == null);
+                    foreach (var profile in config.KeyMappingProfiles)
+                    {
+                        profile.Processes ??= [];
+                        profile.Mappings ??= [];
+                    }
                     _config = config;
                     Logger.LogInfo($"成功加载配置文件，包含 {config.Commands.Count} 个命令");
 
@@ -396,6 +422,45 @@ namespace CommandLauncher
       ""RunAsAdmin"": ").Append(cmd.RunAsAdmin ? "true" : "false").Append(@"
     }");
                 if (i < config.Commands.Count - 1)
+                    sb.Append(',');
+            }
+
+            sb.Append(@"
+  ],
+  // 按键映射方案（可选；仅当前台窗口属主的进程名命中 Processes 列表时映射生效——不区分大小写，
+  // Processes 为空 = 全局生效但本程序自身窗口除外；From/To 为单个主键名，语法同热键：
+  // A-Z / 0-9 / F1-F12 / 方向键 / 编辑键 / 常用标点，不允许带修饰键）
+  // 示例：玩星际争霸时把 z/x/c 映射为 F2/F3/F4，方案仅在 StarCraft.exe 前台时生效
+  ""KeyMappingProfiles"": [");
+
+            for (int i = 0; i < config.KeyMappingProfiles.Count; i++)
+            {
+                var profile = config.KeyMappingProfiles[i];
+                sb.Append(@"
+    {
+      ""Name"": ").Append(Str(profile.Name)).Append(@",
+      ""Enabled"": ").Append(profile.Enabled ? "true" : "false").Append(@",
+      ""Processes"": [");
+                for (int j = 0; j < profile.Processes.Count; j++)
+                {
+                    sb.Append(Str(profile.Processes[j]));
+                    if (j < profile.Processes.Count - 1)
+                        sb.Append(", ");
+                }
+                sb.Append(@"],
+      ""Mappings"": [");
+                for (int j = 0; j < profile.Mappings.Count; j++)
+                {
+                    var mapping = profile.Mappings[j];
+                    sb.Append(@"
+        { ""From"": ").Append(Str(mapping.From)).Append(@", ""To"": ").Append(Str(mapping.To)).Append(@" }");
+                    if (j < profile.Mappings.Count - 1)
+                        sb.Append(',');
+                }
+                sb.Append(@"
+      ]
+    }");
+                if (i < config.KeyMappingProfiles.Count - 1)
                     sb.Append(',');
             }
 

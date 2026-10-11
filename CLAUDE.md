@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含七个相互独立的功能：
+Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时启用 `UseWPF` 和 `UseWindowsForms`）。包含八个相互独立的功能：
 
 1. **命令启动器**（`MainWindow`）：全局热键（默认 `Ctrl+Shift+I`）弹出的搜索式命令面板，从 JSON 配置读取命令并通过 `Process.Start` 执行。
 2. **Alt+Tab 窗口切换器**（`SwitcherWindow`）：接管系统 Alt+Tab，竖向列出当前窗口（图标 + 标题）供切换。
@@ -15,8 +15,9 @@ Windows 平台桌面工具，基于 **.NET 8 WPF**（`net8.0-windows`，同时�
 5. **护眼模式**（`EyeCareManager`）：内置「正常」「办公」两种色温/亮度模式，经命令启动器（搜「护眼」）或托盘菜单选择，通过 Magnification 全屏颜色矩阵生效。
 6. **自动更新**（`UpdateChecker` + `UpdateInstaller` + `UpdateCoordinator` + `UpdateWindow`）：启动后延迟后台检查 GitHub Release（每天最多一次），发现新版本弹窗提示，一键下载校验、自替换 exe 并重启。
 7. **开机自启与安装**（`AutoStartManager` + `SingleInstance` + `scripts/install.ps1`）：登录后经计划任务（非注册表 Run 键）自动启动；单实例互斥 + 广播唤起，重复启动时唤醒已运行实例而非起第二个；安装脚本装到 `%LOCALAPPDATA%\Programs`。
+8. **按键映射**（`KeyMapping.cs` + `KeyboardHook`）：按方案把按键替换为其它键（如 `z`→`F2`），仅在方案配置的进程白名单（如 `StarCraft.exe`）前台时生效、其余应用不受影响；多套方案存于配置 `KeyMappingProfiles` 段，托盘子菜单可勾选启用/禁用。
 
-前三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出；截图/贴图为静态类无常驻窗口，由 `WindowActions` 热键或托盘菜单按需触发；护眼模式无独立窗口，启动时恢复上次选择；快捷键设置窗口（`HotkeySettingsWindow`，可视化自定义全部全局热键与命令热键）同样无常驻窗口，经内置命令 `hotkeys` 或托盘菜单「快捷键设置」按需弹出；自动更新在 `App.OnStartup` 末尾 fire-and-forget 后台检查，仅发现新版本时弹提示窗（`UpdateWindow`），无常驻窗口。单实例互斥与开机自启同样无常驻窗口：前者是 `Program.Main` 里的命名 Mutex + 隐藏消息窗口（拿不到互斥量的第二个实例广播唤起后即退出），后者是登录触发的计划任务，运行期不产生任何窗口。
+前三者由 `App.OnStartup` 同时创建、常驻后台（通过系统托盘 `NotifyIcon` 管理），平时隐藏，靠热键/钩子唤出；截图/贴图为静态类无常驻窗口，由 `WindowActions` 热键或托盘菜单按需触发；护眼模式无独立窗口，启动时恢复上次选择；快捷键设置窗口（`HotkeySettingsWindow`，可视化自定义全部全局热键与命令热键）同样无常驻窗口，经内置命令 `hotkeys` 或托盘菜单「快捷键设置」按需弹出；自动更新在 `App.OnStartup` 末尾 fire-and-forget 后台检查，仅发现新版本时弹提示窗（`UpdateWindow`），无常驻窗口。单实例互斥与开机自启同样无常驻窗口：前者是 `Program.Main` 里的命名 Mutex + 隐藏消息窗口（拿不到互斥量的第二个实例广播唤起后即退出），后者是登录触发的计划任务，运行期不产生任何窗口。按键映射同样无常驻窗口：方案在 `SwitcherWindow` 创建时装配、经 `ConfigUpdated` 热更新，运行期只是 `KeyboardHook` 内的按键替换状态，开关入口是托盘子菜单。
 
 ## 常用命令
 
@@ -144,6 +145,20 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 - **颜色效果跨进程残留**：程序退出后矩阵仍生效，因此 `App.OnStartup` 先还原再恢复上次模式（`RestoreLastMode`），`App.OnExit` 必调 `ResetEffect`。
 - **模式表内置固定**（参数对照 CareUEyes 官方文档，取日间值；仅保留「正常」「办公」两种）：改模式改 `EyeCareManager.Modes` 一处即可，命令注入/托盘子菜单/持久化都自动跟随。旧版本持久化的已删除模式名（如「智能」）在 `RestoreLastMode` 中找不到对应模式，自然回退为不应用。
 - **交互**：与 `config` 等内置命令同机制——`RefreshCommandList` 注入「护眼：xxx」、`ExecuteAppCommand` 分发；托盘「护眼模式」子菜单在 `DropDownOpening` 时按 `EyeCareManager.CurrentModeName` 刷新勾选。当前模式名持久化在 `AppState`（`GetEyeCareMode`/`SetEyeCareMode`）。
+
+## 按键映射实现要点
+
+涉及文件：`KeyMapping.cs`（运行时方案结构、校验构建、匹配、前台进程缓存、扩展键判定，配套单测 `KeyMappingTests`）、`KeyboardHook.cs`（映射分支与按键注入）、`AppConfig.cs`（`KeyMappingProfiles` 配置段）、`SwitcherWindow.cs`（装配与让路守卫）、`MainWindow.cs`（托盘子菜单）。
+
+- **用途与生效模型**：把源键替换为目标键（如 z→F2），主要场景是给不能改键的老游戏（星际争霸 1）自定义按键。方案级 `Processes` 进程白名单不区分大小写，仅当前台窗口属主的进程名命中时生效；空白名单 = 全局生效；**本程序自身窗口前台时始终不映射**（`ForegroundProcessCache` 按 pid 短路），保证命令面板/剪贴板窗口正常输入。托盘子菜单「按键映射」勾选切换方案 Enabled（`BuildKeyMappingMenu`，每次 `DropDownOpening` 重建列表——方案可增删；点击时按引用 + 方案名双重定位当前配置对象，配置热重载会整体替换对象，持旧引用会写进废弃对象）。
+- **触发范围是「所有组合」**（用户确认的语义）：命中与修饰键状态无关，只替换主键——修饰键是真实按下、原样透传给应用，Ctrl+Z 自然变成 Ctrl+F2（实现上不读任何修饰键状态）。
+- **HookProc 分支顺序即优先级**（`KeyboardHook.cs`）：注入透传（LLKHF_INJECTED）→ **① 已接管配对/重复** → 录制 → 动作绑定 → Esc/Del 守卫 → **② 映射新命中**：
+  - ① `_activeMappings`（源 vk → 目标 vk）是「已接管」状态机：源键 keydown 命中时记录并吞掉、注入目标 down；此后**每个自动重复 keydown 都直接对记录里的目标键补注入 down（不重新解析）**——按住源键期间切前台/配置热重载不会让目标键中途漂移；keyup 吞掉并补注入 up（**判定只看记录、不看进程当前是否仍匹配**），保证 down/up 严格成对，否则松手时目标键卡在按下态。本分支放在录制之前：已接管的键其后续事件仍由映射会话负责，录制只应看到新按下的键。
+  - ② 排在动作绑定与 Esc/Del 守卫之后：绑定优先（From=F4 撞 Screenshot 时映射永不生效，须先禁用该绑定）；映射不链式（注入键透传，z→F2 且 F2→X 时按 z 只出 F2，防循环）。让路规则：切换器激活时整体让路（`ShouldSkipKeyMapping` 由 SwitcherWindow 装配为 `() => _isActive`，否则映射含 Esc/方向键会吞掉 AltTabHook 的导航键）；**Tab 在 Alt 按下时无条件让路**——KeyboardHook 位于钩子链头，若吞掉 Alt+Tab 的 Tab，切换器将永远无法激活（Shift+Alt+Tab 同被覆盖）。
+- **卡键防护三处释放点**：`ReleaseAllActiveMappings()`（对残留目标补注入 up 后清空）在 **SetKeyMappings 替换、RefreshInstallState 的卸载分支、Dispose** 三处调用——按住源键时配置热重载/钩子卸载/退出，不补 up 目标键会永久卡在系统里。
+- **注入用 `keybd_event` 且显式传扫描码**（`MapVirtualKey(vk, MAPVK_VK_TO_VSC)`），扩展键（`KeyMappingInjection.IsExtendedKey`：方向键/Home/End/PgUp/PgDn/Insert/Delete）附加 `KEYEVENTF_EXTENDEDKEY`——DirectInput 时代的老游戏常按扫描码识别按键，`bScan=0` 靠系统兜底不够稳；实测游戏仍无视注入键时的逃生档是 SendInput + `KEYEVENTF_SCANCODE`（不默认引入）。注入键带 LLKHF_INJECTED，不递归命中映射/绑定。
+- **前台进程名缓存**（`ForegroundProcessCache`）：热路径只做 `GetForegroundWindow` + 句柄比对，仅前台 hwnd 变化时才 `GetWindowThreadProcessId` + `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `QueryFullProcessImageName` 解析一次（无 attach，无挂起风险）；解析失败/无前台（锁屏）/本进程自身返回空串 = 不映射（fail-open 透传），每次前台变化最多记一条 WARN，**映射命中绝不逐键写日志**（与既有 Esc/Del 分支口径一致）。
+- **配置校验**（`KeyMapping.BuildProfile`）：From/To 必须可解析且**不带修饰键**（"Ctrl+F2" 直接拒绝——修饰键本就原样透传，写进配置无意义）、From != To、同方案内 From 去重保留首条；非法条目跳过并记 WARN，全部无效的方案不生效。多方案同进程重叠时按配置顺序取第一个（空白名单的全局方案排前会遮蔽其后白名单方案）。`Config.KeyMappingProfiles` 必须同步 `ComposeConfigJson` 手写拼接（**嵌套两层数组**，此前只有扁平数组）、`LoadConfig` 迁移（缺失补空表；`Processes`/`Mappings` 逐项 `??= []`）与 `AppConfigTests` round-trip。
 
 ## 自动更新与发布实现要点
 

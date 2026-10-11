@@ -27,7 +27,7 @@ namespace CommandLauncher
     }
 
     /// <summary>
-    /// 可配置窗口动作热键（WH_KEYBOARD_LL）+ 框选选中态的全局 Esc/Del。
+    /// 可配置窗口动作热键（WH_KEYBOARD_LL）+ 框选选中态的全局 Esc/Del + 按进程白名单生效的按键映射。
     /// Alt+Tab 已由 <see cref="AltTabHook"/> 专用钩子接管，本类不再处理。
     /// 钩子安装在 WPF UI 线程上，回调运行在 UI 线程；回调本体只做轻量判定，
     /// 实际 UI 操作由订阅方通过 Dispatcher.BeginInvoke 异步执行，避免触发系统钩子超时。
@@ -59,7 +59,12 @@ namespace CommandLauncher
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
+        [DllImport("user32.dll")]
+        private static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
         private const uint KEYEVENTF_KEYUP = 0x0002;
+        private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+        private const uint MAPVK_VK_TO_VSC = 0;
         // 未映射的虚拟键，用作掩码键：Win 组合键的主键被吞掉后，系统只看到 Win 按下+松开会弹出开始菜单，
         // 注入一次该键让系统认为 Win 按住期间有其它按键发生（与 AutoHotkey 的 mask key 做法相同）。
         private const byte VK_MASK = 0xFF;
@@ -83,6 +88,7 @@ namespace CommandLauncher
         private const int VK_SHIFT = 0x10;
         private const int VK_CONTROL = 0x11;
         private const int VK_MENU = 0x12;   // Alt
+        private const int VK_TAB = 0x09;
         private const int VK_ESCAPE = 0x1B;
         private const int VK_DELETE = 0x2E;
         private const int VK_LWIN = 0x5B;
@@ -136,6 +142,58 @@ namespace CommandLauncher
             Logger.LogInfo($"动作热键绑定已更新，共 {_actionBindings.Count} 条");
             RefreshInstallState();
         }
+
+        #region 按键映射（按键替换，如 z→F2）
+
+        // 已装配的映射方案表（整体替换，仅在 UI 线程读写，与钩子回调同线程，无需加锁）
+        private IReadOnlyList<KeyMappingProfileRuntime> _keyMappingProfiles = [];
+
+        // 当前处于「已接管」状态的映射：源 vk → 目标 vk。
+        // 源键 keydown 命中映射时记录并吞掉原始键、注入目标键 down；keyup 时按记录配对释放。
+        // 只在钩子回调（UI 线程）与 UI 线程的装配/释放路径上读写，无需加锁。
+        private readonly Dictionary<int, int> _activeMappings = [];
+
+        /// <summary>整体替换按键映射方案表（配置热更新时调用，须在 UI 线程）。</summary>
+        public void SetKeyMappings(IReadOnlyList<KeyMappingProfileRuntime>? profiles)
+        {
+            _keyMappingProfiles = profiles ?? [];
+            ReleaseAllActiveMappings(); // 用户可能正按住源键：替换前先补目标键 up，避免卡键
+            Logger.LogInfo($"按键映射方案已更新，{_keyMappingProfiles.Count} 个方案生效");
+            RefreshInstallState();
+        }
+
+        /// <summary>由 SwitcherWindow 提供：切换器激活时映射整体让路（不吞键、不注入）。
+        /// 否则映射若含 Esc/方向键会吞掉 AltTabHook 的导航键，破坏切换器操作。
+        /// 不参与钩子安装判定（是否需要钩子由映射表自身决定）。</summary>
+        public Func<bool>? ShouldSkipKeyMapping { get; set; }
+
+        /// <summary>
+        /// 释放全部「已接管」的映射键：对每个记录的目标键补注入 up 后清空记录。
+        /// 调用时机：映射表被替换、钩子即将卸载（含 Dispose）——否则这些路径会让
+        /// 按住源键时注入的目标键永久卡在按下态。
+        /// </summary>
+        private void ReleaseAllActiveMappings()
+        {
+            if (_activeMappings.Count == 0)
+                return;
+
+            Logger.LogInfo($"按键映射：释放 {_activeMappings.Count} 个仍处于按下状态的映射键（补注入 keyup）");
+            foreach (var target in _activeMappings.Values)
+                InjectKey(target, keyUp: true);
+            _activeMappings.Clear();
+        }
+
+        /// <summary>注入一次按键（down 或 up）。显式传扫描码并对扩展键附加 KEYEVENTF_EXTENDEDKEY：
+        /// DirectInput 时代的老游戏（如星际争霸）常按扫描码识别按键，bScan=0 靠系统兜底不够稳。</summary>
+        private static void InjectKey(int vk, bool keyUp)
+        {
+            byte scan = (byte)MapVirtualKey((uint)vk, MAPVK_VK_TO_VSC);
+            uint flags = (keyUp ? KEYEVENTF_KEYUP : 0)
+                | (KeyMappingInjection.IsExtendedKey(vk) ? KEYEVENTF_EXTENDEDKEY : 0);
+            keybd_event((byte)vk, scan, flags, UIntPtr.Zero);
+        }
+
+        #endregion
 
         #region 按键录制（快捷键设置窗口用）
 
@@ -292,10 +350,11 @@ namespace CommandLauncher
                 Logger.LogInfo("键盘钩子安装成功");
         }
 
-        /// <summary>条件安装/卸载：有动作绑定、录制态或选中态守卫时安装，否则卸载，缩短全局钩链。</summary>
+        /// <summary>条件安装/卸载：有动作绑定、映射、录制态或选中态守卫时安装，否则卸载，缩短全局钩链。</summary>
         private void RefreshInstallState()
         {
             bool needHook = _actionBindings.Count > 0
+                || _keyMappingProfiles.Count > 0
                 || _recordingCallback != null
                 || ShouldCancelSelectionOnEscape != null
                 || ShouldDeleteSelection != null;
@@ -306,6 +365,7 @@ namespace CommandLauncher
             }
             else if (!needHook && _hookId != IntPtr.Zero)
             {
+                ReleaseAllActiveMappings(); // 钩子即将卸载：按住的映射键收不到 keyup，先补目标键 up
                 UnhookWindowsHookEx(_hookId);
                 _hookId = IntPtr.Zero;
                 Logger.LogInfo("键盘钩子已卸载（无绑定/守卫，缩短钩链）");
@@ -326,6 +386,18 @@ namespace CommandLauncher
                 // 不参与任何判定：注入序列若参与绑定匹配会命中用户自定义绑定造成递归/误触发。
                 if ((data.flags & 0x10u) != 0) // LLKHF_INJECTED
                     return CallNextHookEx(_hookId, nCode, wParam, lParam);
+
+                // 按键映射的「已接管」状态优先于一切（含录制）：源键按下时已被吞掉并注入目标键 down，
+                // 此后它的每个自动重复 keydown 都继续对「记录里的目标键」补注入 down（不重新解析——
+                // 用户按住源键期间切前台/热重载不会让目标键中途漂移）；keyup 必须吞掉并补注入 up，
+                // 保证 down/up 严格成对，否则松手时目标键会卡在按下态。
+                if (_activeMappings.TryGetValue(vk, out int activeTarget))
+                {
+                    InjectKey(activeTarget, keyUp: !isKeyDown);
+                    if (!isKeyDown)
+                        _activeMappings.Remove(vk);
+                    return (IntPtr)1;
+                }
 
                 // 按键录制模式：吞掉一切非注入按键（含 keyup），只把非修饰键的首次按下回调出去。
                 // 必须放在动作绑定匹配之前：否则录制时按到已有绑定的组合会真的触发动作。
@@ -371,6 +443,25 @@ namespace CommandLauncher
                     DeleteSelection?.Invoke();
                     return (IntPtr)1;
                 }
+
+                // 按键映射命中（如 z→F2）：排在动作绑定与 Esc/Del 守卫之后——绑定优先，
+                // 命中即执行且不再映射。让路判断：① 切换器激活时整体让路（否则映射含 Esc/方向键
+                // 会吞掉 AltTabHook 的导航键）；② Tab 在 Alt 按下时让路（KeyboardHook 位于钩子链头，
+                // 若吞掉 Alt+Tab 的 Tab，切换器将永远无法激活；Shift+Alt+Tab 同被覆盖）。
+                // 映射与修饰键状态无关（「所有组合」语义）：修饰键是真实按下、原样透传给应用，
+                // 本分支只替换主键，Ctrl+Z 自然变成 Ctrl+F2。
+                if (isKeyDown && _keyMappingProfiles.Count > 0
+                    && ShouldSkipKeyMapping?.Invoke() != true
+                    && !(vk == VK_TAB && IsKeyPressed(VK_MENU)))
+                {
+                    string processName = ForegroundProcessCache.GetForegroundProcessName();
+                    if (KeyMapping.TryResolve(_keyMappingProfiles, processName, vk, out int targetVk))
+                    {
+                        _activeMappings[vk] = targetVk;
+                        InjectKey(targetVk, keyUp: false);
+                        return (IntPtr)1;
+                    }
+                }
             }
 
             return CallNextHookEx(_hookId, nCode, wParam, lParam);
@@ -394,6 +485,9 @@ namespace CommandLauncher
             _recordingCallback = null;
             _recordingDownKeys.Clear();
             _recordingModifierHeld.Clear();
+
+            // 兜底：按住的映射键收不到 keyup，先补目标键 up 再卸载（否则目标键永久卡在按下态）
+            ReleaseAllActiveMappings();
 
             if (_hookId != IntPtr.Zero)
             {

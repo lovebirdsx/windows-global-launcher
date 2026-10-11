@@ -1,6 +1,6 @@
 # Windows Global Launcher
 
-常驻系统托盘的 Windows 桌面工具,包含七个相互独立的功能:命令启动器、Alt+Tab 窗口切换器、剪贴板历史、截图与贴图、护眼模式、自动更新、开机自动启动。平时隐藏在后台,靠全局热键唤出。
+常驻系统托盘的 Windows 桌面工具,包含八个相互独立的功能:命令启动器、Alt+Tab 窗口切换器、剪贴板历史、截图与贴图、护眼模式、按键映射、自动更新、开机自动启动。平时隐藏在后台,靠全局热键唤出。
 
 [![CI](https://github.com/lovebirdsx/windows-global-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/lovebirdsx/windows-global-launcher/actions/workflows/ci.yml)
 
@@ -72,6 +72,17 @@ Snipaste 风格的区域截图（默认热键 `F4`）与屏幕贴图（默认 `F
 
 * 通过 Magnification 全屏颜色矩阵实现（不依赖显卡 gamma 支持，HDR/新驱动下也能用）
 * 当前模式自动保存，程序启动时恢复，退出时还原
+
+### 按键映射
+
+按配置把按键替换为其它键（如 `z`→`F2`、`x`→`F3`、`c`→`F4`），仅在指定应用运行时生效——典型场景：给不能改键的老游戏（如星际争霸 1）自定义按键，平时打字完全不受影响。
+
+* 方案在配置文件 `KeyMappingProfiles` 段定义，可配多套（见下文配置示例）
+* `Processes` 为进程白名单（不区分大小写，如 `StarCraft.exe`）：仅当该进程的窗口在前台时映射生效；留空表示全局生效（但程序自身窗口始终除外）
+* 映射与修饰键无关：按住 `Ctrl` 再按 `z`，应用收到的是 `Ctrl+F2`（修饰键原样保留、只替换主键）；按住不放会持续输出目标键
+* 托盘菜单「按键映射」子菜单可随时勾选启用/禁用某套方案（对应配置里的 `Enabled` 字段）
+* 可用按键范围同热键语法（字母 / 数字 / `F1`-`F12` / 方向键 / 编辑键 / 常用标点），`From`/`To` 只写单个主键、不带修饰键
+* 注意：映射目标恰好是某个全局热键时（本程序的或其它软件的）会触发该热键；映射不会链式生效（`z`→`F2`、`F2`→`X` 时按 `z` 只出 `F2`）
 
 ### 自动更新
 
@@ -181,6 +192,18 @@ Get-FileHash WindowsGlobalLauncher-vX.Y.Z-win-x64.zip -Algorithm SHA256
     { "Action": "EyeCareOffice", "HotKey": "", "Enabled": true },
     { "Action": "OpenHotkeySettings", "HotKey": "", "Enabled": true }
   ],
+  "KeyMappingProfiles": [
+    {
+      "Name": "星际争霸",
+      "Enabled": true,
+      "Processes": [ "StarCraft.exe" ],
+      "Mappings": [
+        { "From": "Z", "To": "F2" },
+        { "From": "X", "To": "F3" },
+        { "From": "C", "To": "F4" }
+      ]
+    }
+  ],
   "Commands": [
     {
       "Name": "记事本",
@@ -196,6 +219,8 @@ Get-FileHash WindowsGlobalLauncher-vX.Y.Z-win-x64.zip -Algorithm SHA256
 > `RunAsAdmin` 可选,默认 `false`:命令以普通用户权限启动(借用桌面 Shell 令牌降权)。设为 `true` 则保留管理员权限启动。降权失败(如 explorer 未运行)时会报错且不启动该命令。
 
 > `WindowActions` 可选,缺省时补默认绑定。`Action` 当前可用值:`CloseWindow`(关闭前台窗口)、`VolumeUp`/`VolumeDown`(增大/减小系统音量)、`ToggleMute`(切换静音)、`ShowClipboardHistory`(剪贴板历史)、`Screenshot`(区域截图)、`PinClipboard`(把剪贴板内容钉为屏幕贴图：图片优先，无图片有文字则钉为便签)、`TogglePinVisibility`(隐藏/显示所有贴图)、`PinBoxSelect`(框选贴图整体移动)、`ShowContextMenu`(模拟 `Shift+F10` 弹出右键菜单)、`EyeCareNormal`/`EyeCareOffice`(护眼模式：正常/办公)、`OpenHotkeySettings`(打开快捷键设置)；`HotKey` 为空表示该动作不绑定热键(护眼模式等新增动作默认如此)；`Enabled` 设为 `false` 可临时停用某条绑定。修饰键为精确匹配(如配置 `Alt+Q` 时 `Alt+Shift+Q` 不会触发)。
+
+> `KeyMappingProfiles` 可选,缺省为空(无任何映射)。每套方案:`Name`(方案名,显示在托盘菜单)、`Enabled`(是否启用,托盘菜单「按键映射」子菜单可勾选切换)、`Processes`(进程白名单,不区分大小写,如 `["StarCraft.exe"]`;留空 = 全局生效,但本程序自身窗口始终除外)、`Mappings`(`From`/`To` 键名对,均只写单个主键、不带修饰键;带修饰键、源目标相同或未知键名的条目会被跳过并在日志中提示)。多套方案同时命中时按配置顺序取第一个(并把 `Processes` 留空的全局方案排在前面会遮蔽其后的白名单方案)。
 
 > 热键语法：`Ctrl`/`Alt`/`Shift`/`Win` + 主键，主键支持字母、数字、`F1`-`F12`、`Esc`/`Enter`/`Space`/`Tab`、`Up`/`Down`/`Left`/`Right`、`Home`/`End`/`PageUp`/`PageDown`/`Insert`/`Delete`/`Backspace` 与常用标点。以上三类热键都可在快捷键设置窗口（`hotkeys`）里录制修改，无需手写配置。
 

@@ -489,6 +489,7 @@ namespace CommandLauncher
                 boxSelectItem.Click += (s, e) => PinWindow.StartBoxSelect();
                 contextMenu.Items.Add(boxSelectItem);
                 contextMenu.Items.Add(BuildEyeCareMenu());
+                contextMenu.Items.Add(BuildKeyMappingMenu());
                 var autoStartItem = new System.Windows.Forms.ToolStripMenuItem("开机自动启动") { CheckOnClick = false };
                 autoStartItem.Click += (s, e) => ToggleAutoStart();
                 contextMenu.Items.Add(autoStartItem);
@@ -552,6 +553,69 @@ namespace CommandLauncher
                 }
             };
             return menu;
+        }
+
+        /// <summary>构建托盘「按键映射」子菜单：每次打开时按当前配置重建（方案列表可增删），
+        /// 点击切换方案启用状态并写回配置。</summary>
+        private static System.Windows.Forms.ToolStripMenuItem BuildKeyMappingMenu()
+        {
+            var menu = new System.Windows.Forms.ToolStripMenuItem("按键映射");
+            menu.DropDownOpening += (s, e) =>
+            {
+                menu.DropDownItems.Clear();
+                var profiles = AppConfig.Instance.Config.KeyMappingProfiles;
+                if (profiles.Count == 0)
+                {
+                    menu.DropDownItems.Add(new System.Windows.Forms.ToolStripMenuItem("（未配置，见配置文件 KeyMappingProfiles）")
+                    {
+                        Enabled = false
+                    });
+                    return;
+                }
+
+                foreach (var profile in profiles)
+                {
+                    var item = new System.Windows.Forms.ToolStripMenuItem(GetKeyMappingMenuText(profile))
+                    {
+                        Checked = profile.Enabled,
+                        CheckOnClick = false
+                    };
+                    item.Click += (s2, e2) => ToggleKeyMappingProfile(profile);
+                    menu.DropDownItems.Add(item);
+                }
+            };
+            return menu;
+        }
+
+        /// <summary>按键映射方案在托盘菜单里的显示文本：方案名 + 生效进程（空白名单 = 全局）。</summary>
+        private static string GetKeyMappingMenuText(ConfigKeyMappingProfile profile)
+        {
+            string name = string.IsNullOrWhiteSpace(profile.Name) ? "（未命名方案）" : profile.Name;
+            return profile.Processes.Count == 0
+                ? $"{name}（全局）"
+                : $"{name}（{string.Join(", ", profile.Processes)}）";
+        }
+
+        /// <summary>切换按键映射方案的启用状态并写回配置；保存失败回滚内存改动并提示。</summary>
+        private static void ToggleKeyMappingProfile(ConfigKeyMappingProfile profile)
+        {
+            // 菜单项闭包捕获的是打开菜单那一刻的配置对象；配置热重载会整体替换配置对象，
+            // 点击时先按引用、再按方案名在当前配置里重新定位，避免写进已废弃的旧对象。
+            var current = AppConfig.Instance.Config.KeyMappingProfiles.FirstOrDefault(p =>
+                ReferenceEquals(p, profile) || string.Equals(p.Name, profile.Name, StringComparison.Ordinal));
+            if (current == null)
+                return;
+
+            current.Enabled = !current.Enabled;
+            if (AppConfig.Instance.SaveAndReload())
+            {
+                Logger.LogInfo($"按键映射方案「{current.Name}」已{(current.Enabled ? "启用" : "禁用")}");
+            }
+            else
+            {
+                current.Enabled = !current.Enabled; // 保存失败回滚内存改动（SaveAndReload 失败不重载）
+                MessageBox.Show("保存按键映射方案状态失败，请检查配置文件是否可写", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
 
         private static System.Drawing.Icon CreateDefaultIcon()
