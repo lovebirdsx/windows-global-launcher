@@ -214,29 +214,34 @@ namespace CommandLauncher
         private static bool SameContent(ClipboardEntry a, ClipboardEntry b)
             => a.IsImage == b.IsImage && (a.IsImage ? a.ContentHash == b.ContentHash : a.Text == b.Text);
 
-        /// <summary>查询历史（时间倒序）。filter 非空时对文本条目做模糊匹配，按匹配度排序；图片条目不参与搜索。</summary>
+        /// <summary>查询历史（时间倒序）。filter 非空时对文本条目做模糊匹配，命中结果按粘贴时间倒序；图片条目不参与搜索。</summary>
         public List<ClipboardEntry> Query(string filter)
         {
             if (string.IsNullOrWhiteSpace(filter))
                 return [.. _entries];
 
-            filter = filter.Trim();
-            var scored = new List<(ClipboardEntry Entry, double Score)>();
-            foreach (var e in _entries)
+            return MatchFilter(_entries, filter.Trim());
+        }
+
+        /// <summary>
+        /// 按文本模糊匹配过滤（图片条目不参与），命中结果按 Timestamp 倒序；filter 须已 Trim 且非空。
+        /// 匹配分数只用于判定是否命中、不参与排序（纯静态函数，供单测）。
+        /// </summary>
+        public static List<ClipboardEntry> MatchFilter(IReadOnlyList<ClipboardEntry> entries, string filter)
+        {
+            var matched = new List<ClipboardEntry>();
+            foreach (var e in entries)
             {
                 if (e.IsImage)
                     continue;
                 // 超长文本只取开头一段参与匹配，避免每次按键都全量扫描
                 var target = e.Text.Length > 1000 ? e.Text[..1000] : e.Text;
-                var score = FuzzyMatcher.GetMatchScore(filter, target);
-                if (score > 0)
-                    scored.Add((e, score));
+                if (FuzzyMatcher.GetMatchScore(filter, target) > 0)
+                    matched.Add(e);
             }
-            return scored
-                .OrderByDescending(x => x.Score)
-                .ThenByDescending(x => x.Entry.Timestamp)
-                .Select(x => x.Entry)
-                .ToList();
+            // LINQ OrderByDescending 为稳定排序：Timestamp 相同时保持传入顺序（_entries 头部最新）。
+            // 不要改用 List.Sort（不稳定，同毫秒时间戳会乱序）
+            return matched.OrderByDescending(e => e.Timestamp).ToList();
         }
 
         /// <summary>删除一条历史（图片条目连同文件删除）。</summary>

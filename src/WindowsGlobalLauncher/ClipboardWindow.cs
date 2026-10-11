@@ -160,7 +160,11 @@ namespace CommandLauncher
             ClipboardHistoryManager.Instance.HistoryChanged += () =>
             {
                 if (IsVisible)
-                    Dispatcher.Invoke(RefreshList);
+                    // 必须包 lambda、不能直接传 RefreshList：它带可选参数（bool resetSelection = false），
+                    // 方法组会被编译器合成为 Action<bool>，Dispatcher 按 0 参数调用时抛
+                    // TargetParameterCountException，删除/复制后的 UI 刷新会静默失败
+                    // （旧写法曾让「按 Delete 删除」表现为毫无反应，回归测试见 ClipboardWindowTests）
+                    Dispatcher.Invoke(() => RefreshList());
             };
         }
 
@@ -208,7 +212,8 @@ namespace CommandLauncher
                 if (IsVisible)
                     RefreshList();
             };
-            _searchBox.PreviewKeyDown += SearchBox_PreviewKeyDown;
+            // 键盘处理挂窗口级（详见 OnPreviewKeyDown 注释）：鼠标点过列表项后焦点在 ListBoxItem 上，也须照常生效
+            PreviewKeyDown += OnPreviewKeyDown;
 
             _placeholder = new TextBlock
             {
@@ -538,9 +543,13 @@ namespace CommandLauncher
             }
         }
 
-        #region 键盘交互（与命令启动器一致：↑↓/Ctrl+P/Ctrl+N 移动，回车执行，Esc 取消）
+        #region 键盘交互（↑↓/Ctrl+P/Ctrl+N 移动，回车执行，Esc 取消，Delete 删除）
 
-        private void SearchBox_PreviewKeyDown(object sender, KeyEventArgs e)
+        // 挂在窗口级而非搜索框（命令启动器仍挂搜索框级，此处是剪贴板窗口的有意差异）：
+        // 鼠标点过列表项后键盘焦点落到 ListBoxItem，搜索框级处理器收不到按键，Delete/↑↓/Enter/Esc
+        // 会全部失效；窗口级覆盖搜索框 / ListBoxItem / 列表 / 窗口自身的全部焦点位置。
+        // 对搜索框聚焦场景行为不变：隧道阶段窗口先于 TextBox 触发，Handled 后搜索框不再处理这些键。
+        private void OnPreviewKeyDown(object sender, KeyEventArgs e)
         {
             bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
 
@@ -580,6 +589,13 @@ namespace CommandLauncher
             int idx = Math.Clamp(_list.SelectedIndex + direction, 0, n - 1);
             _list.SelectedIndex = idx;
             _list.ScrollIntoView(_list.SelectedItem);
+
+            // 鼠标点过列表项后键盘焦点在 ListBoxItem 上：让焦点跟随选择，避免 ListBox 内建对
+            // Space 的处理把选择跳回旧焦点项、并在视觉上残留焦点虚框；
+            // 搜索框持有焦点时（IsKeyboardFocusWithin=false）不动焦点，连续输入过滤不受影响。
+            if (_list.IsKeyboardFocusWithin &&
+                _list.ItemContainerGenerator.ContainerFromIndex(idx) is ListBoxItem item)
+                item.Focus();
         }
 
         #endregion
