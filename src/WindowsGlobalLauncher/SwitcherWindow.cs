@@ -263,25 +263,8 @@ namespace CommandLauncher
             ShowActivated = false; // 不抢焦点，保持目标窗口前台历史，使 SetForegroundWindow 可靠
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
 
-            // 列表项样式
-            var itemStyle = new Style(typeof(ListBoxItem));
-            itemStyle.Setters.Add(new Setter(PaddingProperty, new Thickness(12, 6, 12, 6)));
-            itemStyle.Setters.Add(new Setter(MarginProperty, new Thickness(2)));
-            itemStyle.Setters.Add(new Setter(BackgroundProperty, Brushes.Transparent));
-            itemStyle.Setters.Add(new Setter(BorderThicknessProperty, new Thickness(0)));
-            itemStyle.Setters.Add(new Setter(HeightProperty, RowHeight - 4));
-
-            var hoverTrigger = new Trigger { Property = IsMouseOverProperty, Value = true };
-            hoverTrigger.Setters.Add(new Setter(BackgroundProperty, new SolidColorBrush(Color.FromArgb(255, 55, 55, 55))));
-            var selectedTrigger = new Trigger { Property = ListBoxItem.IsSelectedProperty, Value = true };
-            selectedTrigger.Setters.Add(new Setter(BackgroundProperty, new SolidColorBrush(Color.FromArgb(255, 0, 120, 212))));
-            // 通知状态：背景变为 amber 暗橙，优先级低于 hover/selected（排在前面即可）
-            var notifyTrigger = new DataTrigger { Binding = new Binding("HasNotification"), Value = true };
-            notifyTrigger.Setters.Add(new Setter(BackgroundProperty, new SolidColorBrush(Color.FromRgb(120, 65, 0))));
-            itemStyle.Triggers.Add(notifyTrigger);
-            itemStyle.Triggers.Add(hoverTrigger);
-            itemStyle.Triggers.Add(selectedTrigger);
-            _list.ItemContainerStyle = itemStyle;
+            // 列表项样式：自定义 ControlTemplate，选中/悬停用背景色、通知用独立竖条表达
+            ApplySwitcherItemStyle();
 
             // 列表项模板：图标 + 标题
             var template = new DataTemplate();
@@ -358,7 +341,7 @@ namespace CommandLauncher
 
         #endregion
 
-        // Shell hook WndProc：跟踪窗口闪烁状态（HSHELL_FLASH），用于在列表项显示通知圆点
+        // Shell hook WndProc：跟踪窗口闪烁状态（HSHELL_FLASH），用于在列表项显示通知竖条
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
             if (_shellHookMsg != 0 && (uint)msg == _shellHookMsg)
@@ -367,18 +350,18 @@ namespace CommandLauncher
                 if (code == HSHELL_FLASH)
                 {
                     _flashingWindows.Add(lParam);
-                    UpdateNotificationDot(lParam, true);
+                    UpdateNotification(lParam, true);
                 }
                 else if (code == HSHELL_WINDOWACTIVATED || code == HSHELL_RUDEAPPACTIVATED)
                 {
                     _flashingWindows.Remove(lParam);
-                    UpdateNotificationDot(lParam, false);
+                    UpdateNotification(lParam, false);
                 }
             }
             return IntPtr.Zero;
         }
 
-        private void UpdateNotificationDot(IntPtr targetHwnd, bool value)
+        private void UpdateNotification(IntPtr targetHwnd, bool value)
         {
             var item = _items.FirstOrDefault(w => w.Hwnd == targetHwnd);
             if (item != null)
@@ -555,6 +538,80 @@ namespace CommandLauncher
         protected override void OnDeactivated(EventArgs e)
         {
             base.OnDeactivated(e);
+        }
+
+        // 切换器列表项样式：背景色表达选中/悬停，通知用独立的行首竖条表达（两个通道互不覆盖）。
+        // 必须自定义 ControlTemplate：默认 ListBoxItem 模板会在 IsSelected/IsMouseOver 时
+        // 用系统高亮画刷直接覆盖模板内部 Border 的背景，只改 ItemContainerStyle 的 Background 不生效；
+        // 且本窗 ShowActivated=false、列表从不获得焦点，默认模板会走「非活动选中」灰色。
+        private void ApplySwitcherItemStyle()
+        {
+            const string xaml = @"
+<Style xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation""
+       xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml""
+       TargetType=""ListBoxItem"">
+  <Setter Property=""Padding"" Value=""12,6,12,6""/>
+  <Setter Property=""Margin"" Value=""2""/>
+  <Setter Property=""Foreground"" Value=""White""/>
+  <Setter Property=""HorizontalContentAlignment"" Value=""Stretch""/>
+  <Setter Property=""VerticalContentAlignment"" Value=""Center""/>
+  <Setter Property=""SnapsToDevicePixels"" Value=""True""/>
+  <Setter Property=""FocusVisualStyle"" Value=""{x:Null}""/>
+  <Setter Property=""Template"">
+    <Setter.Value>
+      <ControlTemplate TargetType=""ListBoxItem"">
+        <Grid Background=""Transparent"">
+          <!-- 背景层：普通态固定透明，选中/悬停只改这一层 -->
+          <Border x:Name=""Bg"" Background=""Transparent"" SnapsToDevicePixels=""True""/>
+          <!-- 内容层：ContentPresenter 没有 Padding，用 Margin 传递内容缩进 -->
+          <ContentPresenter Margin=""{TemplateBinding Padding}""
+                            HorizontalAlignment=""{TemplateBinding HorizontalContentAlignment}""
+                            VerticalAlignment=""{TemplateBinding VerticalContentAlignment}""
+                            SnapsToDevicePixels=""{TemplateBinding SnapsToDevicePixels}""/>
+          <!-- 通知层：4px overlay，不参与布局、不推移内容，画在蓝底/灰底之上 -->
+          <Border x:Name=""NotificationBar""
+                  Width=""4""
+                  HorizontalAlignment=""Left""
+                  VerticalAlignment=""Stretch""
+                  Background=""#FFE8A33D""
+                  Visibility=""Collapsed""
+                  IsHitTestVisible=""False""
+                  SnapsToDevicePixels=""True""/>
+        </Grid>
+        <ControlTemplate.Triggers>
+          <!-- 后声明者覆盖前者：鼠标悬停在选中行上时保持蓝底 -->
+          <Trigger Property=""IsMouseOver"" Value=""True"">
+            <Setter TargetName=""Bg"" Property=""Background"" Value=""#FF373737""/>
+          </Trigger>
+          <Trigger Property=""IsSelected"" Value=""True"">
+            <Setter TargetName=""Bg"" Property=""Background"" Value=""#FF0078D4""/>
+          </Trigger>
+          <!-- 通知与背景正交：只控制竖条可见性，DataContext 即 WindowEntry -->
+          <DataTrigger Binding=""{Binding HasNotification}"" Value=""True"">
+            <Setter TargetName=""NotificationBar"" Property=""Visibility"" Value=""Visible""/>
+          </DataTrigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>";
+            try
+            {
+                var style = (Style)System.Windows.Markup.XamlReader.Parse(xaml);
+                // Height 仍由 RowHeight 单一来源决定，避免在 XAML 中硬编码
+                style.Setters.Add(new Setter(FrameworkElement.HeightProperty, RowHeight - 4));
+                _list.ItemContainerStyle = style;
+            }
+            catch (Exception ex)
+            {
+                // 解析失败退回基础样式：保留行高/边距，仅选中/悬停颜色回落到系统主题色
+                Logger.LogError("应用切换器列表项样式失败，退回基础样式", ex);
+                var fallback = new Style(typeof(ListBoxItem));
+                fallback.Setters.Add(new Setter(PaddingProperty, new Thickness(12, 6, 12, 6)));
+                fallback.Setters.Add(new Setter(MarginProperty, new Thickness(2)));
+                fallback.Setters.Add(new Setter(HeightProperty, RowHeight - 4));
+                _list.ItemContainerStyle = fallback;
+            }
         }
 
         // 扁平化深色滚动条，与整体黑色主题一致（隐藏箭头按钮，仅保留细圆角 Thumb）。
