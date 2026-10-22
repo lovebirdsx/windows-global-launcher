@@ -130,6 +130,9 @@ namespace CommandLauncher
                 Logger.LogError("关闭增强 OCR 子进程失败", ex);
             }
 
+            // 停掉输入法提示（摘钩子监听器、关角标窗），须在切换器释放键盘钩子之前
+            ImeIndicatorManager.Shutdown();
+
             _switcherWindow?.Dispose();
             ClipboardHistoryManager.Instance.Dispose();
             base.OnExit(e);

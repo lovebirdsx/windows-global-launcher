@@ -21,42 +21,13 @@ namespace CommandLauncher
     /// </summary>
     public class ClipboardWindow : Window
     {
-        #region Win32 P/Invoke（前台窗口与插入符定位）
+        #region Win32 P/Invoke（前台窗口与按键模拟）
 
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
 
         [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-        [DllImport("user32.dll")]
-        private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO lpgui);
-
-        [DllImport("user32.dll")]
-        private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
-
-        [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct POINT { public int X, Y; }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct RECT { public int Left, Top, Right, Bottom; }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct GUITHREADINFO
-        {
-            public int cbSize;
-            public int dwFlags;
-            public IntPtr hwndActive;
-            public IntPtr hwndFocus;
-            public IntPtr hwndCapture;
-            public IntPtr hwndMenuOwner;
-            public IntPtr hwndMoveSize;
-            public IntPtr hwndCaret;
-            public RECT rcCaret;
-        }
 
         private const byte VK_CONTROL = 0x11;
         private const byte VK_V = 0x56;
@@ -650,8 +621,8 @@ namespace CommandLauncher
             {
                 var dpi = VisualTreeHelper.GetDpi(this);
 
-                if (TryGetCaretScreenPoint(_previousForeground, out var caretPt) ||
-                    TryGetCaretViaUIA(out caretPt))
+                if (CaretLocator.TryGetCaretScreenPoint(_previousForeground, out var caretPt) ||
+                    CaretLocator.TryGetCaretScreenPointViaUia(out caretPt, UiaTimeoutMs))
                 {
                     Left = caretPt.X / dpi.DpiScaleX + 4;
                     Top = caretPt.Y / dpi.DpiScaleY + 8;
@@ -674,95 +645,6 @@ namespace CommandLauncher
             {
                 Logger.LogError("剪贴板窗口定位失败，使用默认位置", ex);
                 WindowStartupLocation = WindowStartupLocation.CenterScreen;
-            }
-        }
-
-        /// <summary>取前台窗口插入符的屏幕坐标（物理像素）。自绘光标的应用（浏览器等）取不到，返回 false。</summary>
-        private static bool TryGetCaretScreenPoint(IntPtr foreground, out System.Drawing.Point point)
-        {
-            point = default;
-            if (foreground == IntPtr.Zero)
-                return false;
-
-            uint threadId = GetWindowThreadProcessId(foreground, out _);
-            var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
-            if (!GetGUIThreadInfo(threadId, ref info) || info.hwndCaret == IntPtr.Zero)
-                return false;
-
-            // 宽高均为 0 说明插入符不可见
-            if (info.rcCaret.Right <= info.rcCaret.Left && info.rcCaret.Bottom <= info.rcCaret.Top)
-                return false;
-
-            var pt = new POINT { X = info.rcCaret.Left, Y = info.rcCaret.Bottom };
-            if (!ClientToScreen(info.hwndCaret, ref pt))
-                return false;
-
-            point = new System.Drawing.Point(pt.X, pt.Y);
-            return true;
-        }
-
-        /// <summary>
-        /// 经 UI Automation 取焦点元素的插入符位置（屏幕坐标，物理像素）。
-        /// VS Code 等 Electron/Chromium 应用的光标是自绘的，GetGUIThreadInfo 取不到，
-        /// 但它们实现了 TextPattern，可从选区矩形定位光标。
-        /// UIA 客户端 API 可能因目标应用卡顿而长时间阻塞，故放到后台线程执行并等待短超时；
-        /// 超时/失败静默回退到「鼠标所在屏幕居中」，绝不拖住 UI 线程。
-        /// </summary>
-        private static bool TryGetCaretViaUIA(out System.Drawing.Point point)
-        {
-            point = default;
-            try
-            {
-                var task = Task.Run(GetCaretViaUIAOnBackground);
-                if (!task.Wait(UiaTimeoutMs))
-                {
-                    Logger.LogWarning("UI Automation 取插入符位置超时，回退到屏幕居中");
-                    return false;
-                }
-                var p = task.Result;
-                if (!p.HasValue)
-                    return false;
-                point = p.Value;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Logger.LogWarning($"UI Automation 取插入符位置失败: {ex.Message}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// 后台线程执行 UIA 查询，只把纯数据坐标（Point?）传回 UI 线程；
-        /// AutomationElement 等 UIA 对象全部留在后台线程内，不跨线程带出。
-        /// </summary>
-        private static System.Drawing.Point? GetCaretViaUIAOnBackground()
-        {
-            try
-            {
-                var focused = System.Windows.Automation.AutomationElement.FocusedElement;
-                if (focused == null)
-                    return null;
-                if (!focused.TryGetCurrentPattern(System.Windows.Automation.TextPattern.Pattern, out var patternObj))
-                    return null;
-
-                var ranges = ((System.Windows.Automation.TextPattern)patternObj).GetSelection();
-                if (ranges.Length == 0)
-                    return null;
-
-                // 多行选区时取最后一个矩形（光标在选区末尾）；插入符矩形的宽度为 0 属正常
-                var rects = ranges[^1].GetBoundingRectangles();
-                if (rects.Length == 0)
-                    return null;
-                var rect = rects[^1];
-                if (rect.IsEmpty || rect.Height <= 0)
-                    return null;
-
-                return new System.Drawing.Point((int)rect.Left, (int)rect.Bottom);
-            }
-            catch
-            {
-                return null;
             }
         }
 

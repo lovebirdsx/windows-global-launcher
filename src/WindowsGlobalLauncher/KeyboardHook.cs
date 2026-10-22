@@ -143,6 +143,19 @@ namespace CommandLauncher
             RefreshInstallState();
         }
 
+        private Action<int, bool>? _keyActivityListener;
+        /// <summary>被动观察任意非注入按键（不参与吞键判定）。回调运行在钩子线程（UI 线程），必须极轻量。</summary>
+        public Action<int, bool>? KeyActivityListener
+        {
+            get => _keyActivityListener;
+            set
+            {
+                if (ReferenceEquals(_keyActivityListener, value)) return;
+                _keyActivityListener = value;
+                RefreshInstallState();
+            }
+        }
+
         #region 按键映射（按键替换，如 z→F2）
 
         // 已装配的映射方案表（整体替换，仅在 UI 线程读写，与钩子回调同线程，无需加锁）
@@ -356,6 +369,7 @@ namespace CommandLauncher
             bool needHook = _actionBindings.Count > 0
                 || _keyMappingProfiles.Count > 0
                 || _recordingCallback != null
+                || _keyActivityListener != null
                 || ShouldCancelSelectionOnEscape != null
                 || ShouldDeleteSelection != null;
 
@@ -405,6 +419,14 @@ namespace CommandLauncher
                 {
                     HandleRecordingEvent(vk, isKeyDown);
                     return (IntPtr)1;
+                }
+
+                // 输入法提示的被动观察点：不吞键、不改变任何既有分支的返回值。
+                // 放在录制分支之后：快捷键录制期间不弹提示。
+                if (_keyActivityListener != null)
+                {
+                    try { _keyActivityListener(vk, isKeyDown); }
+                    catch (Exception ex) { Logger.LogError("输入法提示按键监听异常", ex); }
                 }
 
                 // 可配置的动作热键（如 Alt+Q 关闭前台窗口）：修饰键精确匹配，命中即吞掉
@@ -488,6 +510,9 @@ namespace CommandLauncher
 
             // 兜底：按住的映射键收不到 keyup，先补目标键 up 再卸载（否则目标键永久卡在按下态）
             ReleaseAllActiveMappings();
+
+            // 退出/重装时不得残留观察者（否则钩子可能因它被重新装上）
+            _keyActivityListener = null;
 
             if (_hookId != IntPtr.Zero)
             {

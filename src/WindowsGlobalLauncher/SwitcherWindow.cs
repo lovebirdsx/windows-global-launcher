@@ -65,6 +65,9 @@ namespace CommandLauncher
         /// </summary>
         public void BeginKeyRecording(Action<int, bool, bool, bool, bool> onKeyDown)
         {
+            // 录制期间钩子会吞掉一切按键（含 keyup），且焦点监听也不应触发提示：
+            // PauseForRecording 会隐藏角标、作废待办并清空组合键追踪状态。
+            ImeIndicatorManager.PauseForRecording();
             _altTabHook.IsSuppressed = true;
             _hook.BeginKeyRecording(onKeyDown);
         }
@@ -74,6 +77,9 @@ namespace CommandLauncher
         {
             _hook.EndKeyRecording();
             _altTabHook.IsSuppressed = false;
+            // 恢复焦点监听；录制期间丢失的 keyup 由内部一并清掉，
+            // 否则录制结束后轻点 Shift 不再触发提示。
+            ImeIndicatorManager.ResumeAfterRecording();
         }
 
         /// <summary>当前是否处于按键录制模式。</summary>
@@ -171,6 +177,9 @@ namespace CommandLauncher
                 ReloadActionBindings();
                 ReloadKeyMappings();
             });
+
+            // 输入法状态提示：复用本窗口持有的键盘钩子做被动按键观察
+            ImeIndicatorManager.Initialize(_hook);
 
             Current = this;
             Logger.LogInfo("Alt+Tab 切换器初始化完成");

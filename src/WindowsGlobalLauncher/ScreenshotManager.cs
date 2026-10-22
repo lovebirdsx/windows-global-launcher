@@ -53,6 +53,10 @@ namespace CommandLauncher
         /// <summary>发起一次区域截图：冻结整个虚拟屏 → 弹出全屏遮罩交互选区。仅 UI 线程调用。</summary>
         public static void StartCapture()
         {
+            // 避免输入法提示徽标进入冻结帧。Hide() 只是把分层窗口从合成树摘掉，
+            // DWM 要到下一次呈现才更新前台缓冲，所以隐藏过可见角标时需在抓屏前等一帧。
+            bool hidImeIndicator = ImeIndicatorManager.HideIfVisible();
+
             // 计时从入口就开始：日志时间戳只到秒，而「收到请求 → 抓屏完成」这一段（护眼挂起 + DwmFlush×2
             // + CopyFromScreen + 护眼恢复）恰是要精确量的对象，靠秒级时间戳相减误差可达 ±2s。
             var sw = Stopwatch.StartNew();
@@ -80,7 +84,7 @@ namespace CommandLauncher
                 BitmapSource frozen;
                 try
                 {
-                    if (eyeCareSuspended)
+                    if (eyeCareSuspended || hidImeIndicator)
                     {
                         WaitForDwmCompose();
                     }

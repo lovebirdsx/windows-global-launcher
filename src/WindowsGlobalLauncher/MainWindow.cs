@@ -488,6 +488,9 @@ namespace CommandLauncher
                 var boxSelectItem = new System.Windows.Forms.ToolStripMenuItem("框选移动贴图");
                 boxSelectItem.Click += (s, e) => PinWindow.StartBoxSelect();
                 contextMenu.Items.Add(boxSelectItem);
+                var imeIndicatorItem = new System.Windows.Forms.ToolStripMenuItem("输入法状态提示") { CheckOnClick = false };
+                imeIndicatorItem.Click += (s, e) => ImeIndicatorManager.SetEnabled(!ImeIndicatorManager.IsEnabled);
+                contextMenu.Items.Add(imeIndicatorItem);
                 contextMenu.Items.Add(BuildEyeCareMenu());
                 contextMenu.Items.Add(BuildKeyMappingMenu());
                 var autoStartItem = new System.Windows.Forms.ToolStripMenuItem("开机自动启动") { CheckOnClick = false };
@@ -508,6 +511,7 @@ namespace CommandLauncher
                     togglePinsItem.Text = PinWindow.IsAllHidden ? "显示所有贴图" : "隐藏所有贴图";
                     togglePinsItem.Enabled = PinWindow.OpenCount > 0;
                     boxSelectItem.Enabled = PinWindow.OpenCount > 0 && !PinWindow.IsAllHidden; // 整体隐藏时框选必然选不中，同 StartBoxSelect 的忽略口径
+                    imeIndicatorItem.Checked = ImeIndicatorManager.IsEnabled;
 
                     // 计划任务可能被用户在「任务计划程序」里改掉，每次打开菜单实查一次（低频，可接受）
                     _autoStartEnabled = AutoStartManager.IsEnabled();

@@ -30,6 +30,8 @@ namespace CommandLauncher
             public DateTime LastUpdateCheckUtc { get; set; } = DateTime.MinValue;
             // 用户点「跳过此版本」记下的版本号，如 "1.2.3"，空串表示未跳过
             public string SkippedUpdateVersion { get; set; } = "";
+            // 输入法状态提示开关（旧 JSON 缺该字段时保留默认 true）
+            public bool ImeIndicatorEnabled { get; set; } = true;
         }
 
         static string AppStateFilePath
@@ -105,6 +107,19 @@ namespace CommandLauncher
         public void SetEyeCareMode(string name)
         {
             _state.EyeCareMode = name;
+            SaveState();
+        }
+
+        /// <summary>输入法状态提示是否启用（默认开启）。</summary>
+        public bool GetImeIndicatorEnabled()
+        {
+            return _state.ImeIndicatorEnabled;
+        }
+
+        /// <summary>持久化输入法状态提示开关。</summary>
+        public void SetImeIndicatorEnabled(bool enabled)
+        {
+            _state.ImeIndicatorEnabled = enabled;
             SaveState();
         }
 
