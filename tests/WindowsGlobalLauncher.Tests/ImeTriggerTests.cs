@@ -49,27 +49,29 @@ namespace WindowsGlobalLauncher.Tests
         }
 
         [Fact]
-        public void CtrlSpace_TriggersOnSpaceRelease()
+        public void CtrlSpace_TriggersOnSpacePress()
         {
             var tracker = new ImeSwitchChordTracker();
 
             tracker.OnKeyDown(VK_CONTROL);
-            tracker.OnKeyDown(VK_SPACE);
 
-            Assert.True(tracker.OnKeyUp(VK_SPACE));
+            // IME 在空格按下时完成切换：按下即触发，不必等松开
+            Assert.True(tracker.OnKeyDown(VK_SPACE));
+            // 空格松开不重复触发
+            Assert.False(tracker.OnKeyUp(VK_SPACE));
             // Ctrl 自身松开不重复触发
             Assert.False(tracker.OnKeyUp(VK_CONTROL));
         }
 
         [Fact]
-        public void WinSpace_TriggersOnSpaceRelease()
+        public void WinSpace_TriggersOnSpacePress()
         {
             var tracker = new ImeSwitchChordTracker();
 
             tracker.OnKeyDown(VK_LWIN);
-            tracker.OnKeyDown(VK_SPACE);
 
-            Assert.True(tracker.OnKeyUp(VK_SPACE));
+            Assert.True(tracker.OnKeyDown(VK_SPACE));
+            Assert.False(tracker.OnKeyUp(VK_SPACE));
             // 单独按 Win 不提示
             Assert.False(tracker.OnKeyUp(VK_LWIN));
         }
@@ -152,15 +154,16 @@ namespace WindowsGlobalLauncher.Tests
         }
 
         [Fact]
-        public void Reset_ClearsPendingSpaceToggle()
+        public void Reset_ClearsCtrlState()
         {
+            // 重置后 Ctrl 不再被视为按住：随后的普通空格不应触发。
             var tracker = new ImeSwitchChordTracker();
 
             tracker.OnKeyDown(VK_CONTROL);
-            tracker.OnKeyDown(VK_SPACE);
             tracker.Reset();
 
-            Assert.False(tracker.OnKeyUp(VK_SPACE));
+            Assert.False(tracker.OnKeyDown(VK_SPACE));
+            Assert.False(tracker.AnyCtrlAltWinHeld);
         }
 
         [Fact]
@@ -279,29 +282,94 @@ namespace WindowsGlobalLauncher.Tests
         }
 
         [Fact]
-        public void Synchronize_ClearsPendingSpaceToggle()
+        public void Synchronize_ClearsCtrlState()
         {
             var tracker = new ImeSwitchChordTracker();
 
             tracker.OnKeyDown(VK_CONTROL);
-            tracker.OnKeyDown(VK_SPACE);
             tracker.Synchronize(shiftDown: false, ctrlDown: false, altDown: false, winDown: false);
 
-            Assert.False(tracker.OnKeyUp(VK_SPACE));
+            // 物理上 Ctrl 已松开：随后的普通空格不再视为 Ctrl+Space。
+            Assert.False(tracker.OnKeyDown(VK_SPACE));
             Assert.False(tracker.AnyCtrlAltWinHeld);
         }
 
         [Fact]
-        public void CtrlRelease_ClearsSwallowedSpaceToggle()
+        public void CtrlReleasedBeforeSpace_TriggersOnceOnPress()
         {
-            // Space 被按键映射吞掉 keyup 时，Ctrl 松开也要清掉待触发状态
+            // 用户实测的常见松键顺序：Space 按下后先松 Ctrl、再松 Space。
+            // 触发发生在按下时，松键顺序不影响结果，且不会重复触发。
             var tracker = new ImeSwitchChordTracker();
 
             tracker.OnKeyDown(VK_CONTROL);
-            tracker.OnKeyDown(VK_SPACE);
 
-            Assert.False(tracker.OnKeyUp(VK_CONTROL)); // Ctrl 参与了组合，不触发
+            Assert.True(tracker.OnKeyDown(VK_SPACE));   // 按下即触发
+            Assert.False(tracker.OnKeyUp(VK_CONTROL));  // Ctrl 已参与组合，不触发
+            Assert.False(tracker.OnKeyUp(VK_SPACE));    // 空格松开不重复
+        }
+
+        [Fact]
+        public void SpaceFirstThenCtrl_TriggersOnCtrlRelease()
+        {
+            // 空格先按下时尚未构成组合（IME 不会切换）；随后按 Ctrl、松开 Ctrl
+            // 按「独立修饰键点击」触发一次（既有语义）。调用方会 Stop/Start 合并计时器，
+            // 不会重复弹角标。
+            var tracker = new ImeSwitchChordTracker();
+
+            Assert.False(tracker.OnKeyDown(VK_SPACE));    // 先按空格：尚无修饰键
+            Assert.False(tracker.OnKeyDown(VK_CONTROL));  // Ctrl 后按
+            Assert.False(tracker.OnKeyUp(VK_SPACE));      // 空格松开不触发
+            Assert.True(tracker.OnKeyUp(VK_CONTROL));     // 独立 Ctrl 点击 → 触发一次探测
+        }
+
+        [Fact]
+        public void TwoConsecutiveCtrlSpace_EachTriggersOnce()
+        {
+            var tracker = new ImeSwitchChordTracker();
+
+            for (int i = 0; i < 2; i++)
+            {
+                tracker.OnKeyDown(VK_CONTROL);
+                Assert.True(tracker.OnKeyDown(VK_SPACE));
+                Assert.False(tracker.OnKeyUp(VK_SPACE));
+                Assert.False(tracker.OnKeyUp(VK_CONTROL));
+            }
+        }
+
+        [Fact]
+        public void PlainSpace_DoesNotTrigger()
+        {
+            var tracker = new ImeSwitchChordTracker();
+
+            Assert.False(tracker.OnKeyDown(VK_SPACE));
             Assert.False(tracker.OnKeyUp(VK_SPACE));
+        }
+
+        [Fact]
+        public void ShiftSpace_DoesNotTrigger()
+        {
+            var tracker = new ImeSwitchChordTracker();
+
+            tracker.OnKeyDown(VK_LSHIFT);
+            Assert.False(tracker.OnKeyDown(VK_SPACE));
+            Assert.False(tracker.OnKeyUp(VK_SPACE));
+            // Shift 参与了组合，松开不触发
+            Assert.False(tracker.OnKeyUp(VK_LSHIFT));
+        }
+
+        [Fact]
+        public void SpaceAutoRepeat_TriggersEachDownButNotOnUp()
+        {
+            // 按住空格会不断收到 keydown：每次都返回 true，调用方据此重启延迟计时器，
+            // 从而在按住期间推迟探测、松手后只查一次。
+            var tracker = new ImeSwitchChordTracker();
+
+            tracker.OnKeyDown(VK_CONTROL);
+            for (int i = 0; i < 5; i++)
+                Assert.True(tracker.OnKeyDown(VK_SPACE));
+
+            Assert.False(tracker.OnKeyUp(VK_SPACE));
+            Assert.False(tracker.OnKeyUp(VK_CONTROL));
         }
 
         [Fact]

@@ -32,7 +32,7 @@ namespace CommandLauncher
 
         /// <summary>
         /// 喂入一次按键事件。返回 true 表示应触发一次输入法状态检查
-        /// （独立的修饰键点击，或 Ctrl/Win+Space 的空格松开）。
+        /// （独立的修饰键点击，或 Ctrl/Win+Space 的空格按下）。
         /// </summary>
         public bool OnKey(int vk, bool isDown, long now)
         {
@@ -46,8 +46,7 @@ namespace CommandLauncher
                     _tracker.Synchronize(state.Shift, state.Ctrl, state.Alt, state.Win);
                 }
 
-                _tracker.OnKeyDown(vk);
-                return false;
+                return _tracker.OnKeyDown(vk);
             }
 
             return _tracker.OnKeyUp(vk);

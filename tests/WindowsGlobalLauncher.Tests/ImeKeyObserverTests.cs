@@ -14,6 +14,8 @@ namespace WindowsGlobalLauncher.Tests
         private const int VK_SHIFT = 0x10;
         private const int VK_LSHIFT = 0xA0;
         private const int VK_LMENU = 0xA4;
+        private const int VK_CONTROL = 0x11;
+        private const int VK_SPACE = 0x20;
 
         private sealed class PhysicalState
         {
@@ -107,6 +109,43 @@ namespace WindowsGlobalLauncher.Tests
             // 超过间隔：再次自愈。
             Assert.False(observer.OnKey(VK_A, isDown: true, now: 11_200));
             Assert.Equal(2, state.Reads);
+        }
+
+        [Fact]
+        public void CtrlSpace_TriggersOnKeyDown_AndSyncKeepsHeldCtrl()
+        {
+            // 用户实测的常见松键顺序：Space 按下后先松 Ctrl、再松 Space。
+            // 触发发生在 Space 按下时，因此与松键顺序无关；
+            // 此刻触发的低频自愈必须读到 Ctrl 仍按住，不能把本次组合清掉。
+            var state = new PhysicalState();
+            var observer = new ImeKeyObserver(new ImeSwitchChordTracker(), state.Read);
+
+            Assert.False(observer.OnKey(VK_CONTROL, isDown: true, now: 10_000)); // 无追踪状态，先不自愈
+
+            state.Ctrl = true; // 钩子先于系统更新状态表，但 Space 按下时 Ctrl 已在表里
+
+            Assert.True(observer.OnKey(VK_SPACE, isDown: true, now: 10_050));    // 自愈 + 触发
+            Assert.Equal(1, state.Reads);
+
+            Assert.False(observer.OnKey(VK_CONTROL, isDown: false, now: 10_120)); // Ctrl 先松
+            Assert.False(observer.OnKey(VK_SPACE, isDown: false, now: 10_150));   // Space 后松，不重复
+        }
+
+        [Fact]
+        public void StaleCtrl_IsHealedBeforeSpace_NoFalseTrigger()
+        {
+            // Ctrl 的 keyup 丢失、物理已松开：空格按下前的自愈必须先清掉陈旧 Ctrl，
+            // 避免把普通空格误判成 Ctrl+Space 切换。
+            var state = new PhysicalState { Ctrl = true };
+            var observer = new ImeKeyObserver(new ImeSwitchChordTracker(), state.Read);
+
+            Assert.False(observer.OnKey(VK_CONTROL, isDown: true, now: 10_000)); // 无追踪状态，先不自愈
+
+            state.Ctrl = false; // keyup 丢失，物理已松开
+
+            Assert.False(observer.OnKey(VK_SPACE, isDown: true, now: 11_100)); // 自愈清掉陈旧 Ctrl + 空格按下
+            Assert.Equal(1, state.Reads);
+            Assert.False(observer.OnKey(VK_SPACE, isDown: false, now: 11_200));
         }
 
         [Fact]

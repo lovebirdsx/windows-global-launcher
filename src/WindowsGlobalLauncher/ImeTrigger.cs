@@ -9,6 +9,8 @@ namespace CommandLauncher
     /// 但 Shift+字母、Shift+方向键、Alt+Tab 等组合不应误触发提示。
     /// 规则：修饰键按下后若又按下了别的键（或 Ctrl/Win+Space），
     /// 视为组合键的一部分，松开修饰键时不再单独提示。
+    /// Ctrl/Win+Space 在**空格按下**时触发一次：系统在处理该 keydown 时就完成切换，
+    /// 等 keyup 再触发会被松键顺序影响（Ctrl 先松是常见操作，那次切换会整次丢失）。
     ///
     /// 用「按下的 VK 集合」而不是计数：键盘自动重复会对同一个修饰键反复发 keydown，
     /// 若每次 keydown 都累加计数，一次物理松开无法归零，追踪器会永久认为修饰键还按着，
@@ -46,20 +48,20 @@ namespace CommandLauncher
         /// <summary>位标记：该修饰键族参与过组合键，松开时不应单独触发提示。</summary>
         private int _used;
 
-        /// <summary>Ctrl/Win+Space 已按下，等空格松开时触发一次提示。</summary>
-        private bool _spaceToggle;
-
         /// <summary>Ctrl/Alt/Win 任一按住（Shift 不影响判断）。</summary>
         public bool AnyCtrlAltWinHeld => _ctrl > 0 || _alt > 0 || _win > 0;
 
         /// <summary>
-        /// 是否还有需要核对的按键状态（有任何修饰键被判定为按住，或有一次待触发的 Space）。
+        /// 是否还有需要核对的按键状态（有任何修饰键被判定为按住）。
         /// 调用方据此决定是否做低频物理状态自愈。
         /// </summary>
-        public bool HasTrackedState => _shift > 0 || _ctrl > 0 || _alt > 0 || _win > 0 || _spaceToggle;
+        public bool HasTrackedState => _shift > 0 || _ctrl > 0 || _alt > 0 || _win > 0;
 
-        /// <summary>按键按下。修饰键只把 VK 放入集合（自动重复是幂等的）；其它键会把按住的修饰键标记为「已参与组合」。</summary>
-        public void OnKeyDown(int vk)
+        /// <summary>
+        /// 按键按下。修饰键只把 VK 放入集合（自动重复是幂等的），返回 false；
+        /// Ctrl/Win+Space 在空格按下时返回 true，表示应立即触发一次提示。
+        /// </summary>
+        public bool OnKeyDown(int vk)
         {
             int family = GetModifierFamily(vk);
             if (family != 0)
@@ -67,35 +69,36 @@ namespace CommandLauncher
                 // 同一个 VK 的自动重复不再累加：一次物理松开只 Release 一次。
                 if (_pressed.Add(NormalizeModifierVk(vk)))
                     Hold(family);
-                return;
+                return false;
             }
 
             if (vk == VK_SPACE && (_ctrl > 0 || _win > 0))
             {
-                // Ctrl+Space / Win+Space 是系统级输入法切换：空格松开时提示一次。
-                // 按住的所有修饰键都标记为「已参与组合」：本次提示由 _spaceToggle 负责，
-                // 空格松开后再松开 Ctrl/Win 不应重复触发。
-                _spaceToggle = true;
+                // Ctrl+Space / Win+Space 是系统级输入法切换：系统处理这次 keydown 时
+                // 就完成了切换，因此按下即触发，与用户先松 Ctrl 还是先松 Space 无关
+                //（实测约一半的切换是先松 Ctrl，等 keyup 会整次丢弃）。
+                // 按住的所有修饰键都标记为「已参与组合」：松开 Ctrl/Win 不应重复触发。
+                // 自动重复的 keydown 同样返回 true：调用方会 Stop/Start 延迟计时器，
+                // 等于按住空格期间不断推迟，松手后再查一次。
                 MarkHeldUsed(FamilyShift | FamilyCtrl | FamilyAlt | FamilyWin);
-                return;
+                return true;
             }
 
             // 其余任何非修饰键（字母、方向键、Tab、Enter、F1…）都说明按住的修饰键
             // 属于组合键，松开时不再单独提示。Shift+Space 也走这里。
             MarkHeldUsed(FamilyShift | FamilyCtrl | FamilyAlt | FamilyWin);
+            return false;
         }
 
         /// <summary>
-        /// 按键松开。返回 true 表示应触发一次输入法状态提示：
-        /// 独立的修饰键点击（Shift/Ctrl/Alt），或 Ctrl/Win+Space 的空格松开。
+        /// 按键松开。返回 true 表示应触发一次输入法状态提示：独立的修饰键点击（Shift/Ctrl/Alt）。
+        /// 空格 keyup 恒返回 false（Space 从不进入按住状态，Ctrl/Win+Space 已在按下时触发）。
         /// </summary>
         public bool OnKeyUp(int vk)
         {
             if (vk == VK_SPACE)
             {
-                bool toggle = _spaceToggle;
-                _spaceToggle = false;
-                return toggle;
+                return false;
             }
 
             int family = GetModifierFamily(vk);
@@ -110,11 +113,6 @@ namespace CommandLauncher
                 return false;
             }
 
-            // Ctrl/Win 松开时若 Space 的 keyup 没被看到（例如 Space 被按键映射吞掉），
-            // 清掉待触发状态，避免以后某次普通 Space 松开时误触发。
-            if (_spaceToggle && (family == FamilyCtrl || family == FamilyWin))
-                _spaceToggle = false;
-
             if (!Release(family))
             {
                 // 同族的另一个左右变体还按着（如左右 Shift 同时按住），等最后一个松开
@@ -124,7 +122,7 @@ namespace CommandLauncher
             bool used = (_used & family) != 0;
             _used &= ~family;
 
-            // Win 单独按不提示（Win+Space 已由空格松开触发）
+            // Win 单独按不提示（Win+Space 已在空格按下时触发）
             if (family == FamilyWin)
             {
                 return false;
@@ -144,10 +142,6 @@ namespace CommandLauncher
             if (_ctrl > 0 && !ctrlDown) ClearFamily(FamilyCtrl);
             if (_alt > 0 && !altDown) ClearFamily(FamilyAlt);
             if (_win > 0 && !winDown) ClearFamily(FamilyWin);
-
-            // Ctrl/Win 都已物理松开时，任何待触发的 Space 切换都失去意义。
-            if (!ctrlDown && !winDown)
-                _spaceToggle = false;
         }
 
         /// <summary>清空全部状态（录制开始/结束、禁用、钩子重装等场景）。</summary>
@@ -159,7 +153,6 @@ namespace CommandLauncher
             _alt = 0;
             _win = 0;
             _used = 0;
-            _spaceToggle = false;
         }
 
         /// <summary>虚拟键码 → 修饰键族（非修饰键返回 0）。</summary>
@@ -244,8 +237,6 @@ namespace CommandLauncher
             }
 
             _used &= ~family;
-            if (family == FamilyCtrl || family == FamilyWin)
-                _spaceToggle = false;
         }
 
         private void Hold(int family)

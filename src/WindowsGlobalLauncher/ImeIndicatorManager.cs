@@ -18,7 +18,8 @@ namespace CommandLauncher
     /// 在插入符旁短暂显示「中 / 英」角标。
     /// <para>
     /// 触发不再依赖键入（没有 TypingBurst/ModeRefresh）：<see cref="ImeFocusWatcher"/>
-    /// 的焦点/前台事件经约 80ms 去抖后发起一次探测；切换输入法手势仍保留 120ms 延迟查询。
+    /// 的焦点/前台事件经约 80ms 去抖后发起一次探测；切换输入法手势经 150ms 延迟查询
+    ///（Ctrl/Win+Space 在空格按下时即排定）。
     /// </para>
     /// <para>
     /// 线程模型：全部状态只在 UI 线程读写；<see cref="ImeFocusWatcher"/> 的信号可能来自
@@ -32,8 +33,11 @@ namespace CommandLauncher
         /// <summary>焦点通知的合并去抖（只合并焦点检查，前台切换仍立即隐藏）。</summary>
         private const int FocusDebounceMs = 80;
 
-        /// <summary>修饰键松开后延迟检查（等待系统完成输入法切换）。</summary>
-        private const int SwitchCheckDelayMs = 120;
+        /// <summary>
+        /// 切换手势触发后延迟检查（等待系统完成输入法切换）。
+        /// Ctrl/Win+Space 在空格按下时即触发，实测模式变化在 30–93ms 内完成，150ms 留有余量。
+        /// </summary>
+        private const int SwitchCheckDelayMs = 150;
 
         /// <summary>角标显示后自动隐藏的延迟。</summary>
         private const int HideDelayMs = 1000;
@@ -838,7 +842,7 @@ namespace CommandLauncher
             long now = Environment.TickCount64;
             if (_keys.OnKey(vk, isDown, now))
             {
-                // 独立的修饰键点击 / Ctrl+Space / Win+Space：
+                // 独立的修饰键点击 / Ctrl+Space / Win+Space（空格按下即触发）：
                 // 延迟一小段等系统完成切换后再查（仍会重新取插入符）。
                 _switchTimer?.Stop();
                 _switchTimer?.Start();
