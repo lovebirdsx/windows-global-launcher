@@ -39,8 +39,8 @@ namespace CommandLauncher
         /// </summary>
         private const int SwitchCheckDelayMs = 150;
 
-        /// <summary>角标显示后自动隐藏的延迟。</summary>
-        private const int HideDelayMs = 1000;
+        /// <summary>角标显示后自动隐藏的延迟（从开始显示到开始淡出）。</summary>
+        private const int HideDelayMs = 800;
 
         /// <summary>角标显示期间监视前台窗口变化的间隔（切走即隐藏的兜底）。</summary>
         private const int ForegroundWatchMs = 200;
@@ -312,7 +312,7 @@ namespace CommandLauncher
                 _probeTimeoutTimer?.Stop();
                 _switchTimer?.Stop();
                 _worker?.ClearPending();
-                HideBadge();
+                HideWindowImmediately();
             }
             catch (Exception ex)
             {
@@ -694,6 +694,17 @@ namespace CommandLauncher
             catch (Exception ex)
             {
                 Logger.LogError("输入法提示：显示角标失败", ex);
+
+                // 显示中途失败时旧窗口可能停在半透明可见态；先 best-effort 隐藏再丢弃引用。
+                try
+                {
+                    _window?.HideImmediately();
+                }
+                catch
+                {
+                    // 窗口可能已关闭，忽略；清理失败不能阻断下面丢弃引用。
+                }
+
                 _window = null; // 已关闭的窗口不能再 Show，下次重建
                 return false;
             }
@@ -705,6 +716,25 @@ namespace CommandLauncher
             try
             {
                 _window?.HideBadge();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"输入法提示：隐藏角标失败: {ex.Message}");
+            }
+
+            _shownForeground = IntPtr.Zero;
+        }
+
+        /// <summary>
+        /// 立即隐藏、跳过淡出（截图前专用）：淡出需要 150ms，期间抓屏仍会拍到半透明的角标。
+        /// </summary>
+        private static void HideWindowImmediately()
+        {
+            try
+            {
+                _hideTimer?.Stop();
+                _watchTimer?.Stop();
+                _window?.HideImmediately();
             }
             catch (Exception ex)
             {

@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 
 // System.Drawing 与 WPF 的 Point/Rectangle/Size 命名冲突，统一用别名（纯坐标语义，物理像素）
@@ -50,7 +51,16 @@ namespace CommandLauncher
         #endregion
 
         /// <summary>角标基准尺寸（DIP）。物理尺寸 = 该值 × 目标窗口 DPI 缩放。</summary>
-        private const double BadgeSizeDip = 26.0;
+        private const double BadgeSizeDip = 22.0;
+
+        /// <summary>角标完全显示时的不透明度：略透明，减少对正文与候选窗的视觉干扰。</summary>
+        private const double TargetOpacity = 0.88;
+
+        /// <summary>淡入时长（毫秒）。</summary>
+        private const int FadeInMs = 100;
+
+        /// <summary>淡出时长（毫秒）。</summary>
+        private const int FadeOutMs = 150;
 
         /// <summary>角标与插入符的间距（物理像素，与 ImeIndicatorGeometry.Place 的默认值一致）。</summary>
         private const int GapPx = 4;
@@ -68,6 +78,9 @@ namespace CommandLauncher
         private DrawingRectangle _caret;
         private double _assumedScale = 1.0;
         private DrawingPoint _lastPosition;
+
+        // 淡入淡出的代次：淡出进行中又被 ShowAt 重新显示时，旧回调据此让位、不隐藏新窗口。
+        private int _fadeToken;
 
         public ImeIndicatorWindow()
         {
@@ -88,7 +101,7 @@ namespace CommandLauncher
             {
                 Text = "中",
                 Foreground = Brushes.White,
-                FontSize = 14,
+                FontSize = 13,
                 FontWeight = FontWeights.Bold,
                 FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -131,10 +144,14 @@ namespace CommandLauncher
 
         /// <summary>
         /// 在插入符旁显示提示。坐标均为虚拟屏物理像素。
-        /// 重复调用时只更新文字并重新落位，窗口保持可见（不闪烁）。
+        /// 重复调用时只更新文字并重新落位，窗口保持可见（不闪烁）；
+        /// 不透明度从当前值平滑过渡到 <see cref="TargetOpacity"/>，不会每次从 0 重新淡入。
         /// </summary>
         public void ShowAt(string text, DrawingRectangle caretPhysical, IntPtr caretHwnd)
         {
+            // 作废可能仍在进行的淡出：它以 Completed 回调隐藏窗口，不能让它关掉这次新显示。
+            _fadeToken++;
+
             _text.Text = text;
             _border.Background = text == "中" ? ChineseBackground : EnglishBackground;
 
@@ -148,21 +165,100 @@ namespace CommandLauncher
             }
 
             ApplyPosition();
-            Opacity = 1;
+
+            // 落位后再淡入（首次从 0 开始；重复调用从当前不透明度平滑过渡）。
+            AnimateOpacity(TargetOpacity, FadeInMs);
 
             // WPF 在 Show 后才按实际显示器 DPI 完成布局：Loaded 阶段用真实 DPI 复核一次，
             // 目标窗口与角标所在显示器 DPI 不一致时修正尺寸与位置。
             Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(RecheckDpiAndReposition));
         }
 
-        /// <summary>隐藏角标（不销毁窗口，下次 ShowAt 复用）。</summary>
+        /// <summary>淡出后隐藏角标（不销毁窗口，下次 ShowAt 复用）。</summary>
         public void HideBadge()
         {
-            // 已被关闭（应用退出时 WPF 会先关全部窗口）或本就不可见时不调 Hide：
+            // 已被关闭（应用退出时 WPF 会先关全部窗口）或本就不可见时不做动画、不调 Hide：
             // 对已关闭窗口调用会抛 InvalidOperationException，而本方法会被退出清理路径调用。
+            if (!IsVisible)
+            {
+                // 作废尚未触发的淡出回调，并复位不透明度，保证下次 ShowAt 从干净状态开始。
+                _fadeToken++;
+                BeginAnimation(OpacityProperty, null);
+                Opacity = TargetOpacity;
+                return;
+            }
+
+            int token = ++_fadeToken;
+
+            AnimateOpacity(0, FadeOutMs, holdEnd: true, completed: () =>
+            {
+                // 淡出期间又被 ShowAt 重新显示：让位，绝不隐藏新显示的窗口。
+                if (token != _fadeToken)
+                    return;
+
+                try
+                {
+                    // 先摘掉动画再隐藏：不透明度一直被动画持有的话，下次显示的起点与 base 值都会失真。
+                    BeginAnimation(OpacityProperty, null);
+
+                    // 窗口可能已在淡出期间被关闭（应用退出）：对已关闭窗口调 Hide 会抛异常。
+                    if (IsVisible)
+                        Hide();
+                }
+                catch (Exception ex)
+                {
+                    // 回调在 Dispatcher 上异步执行，异常外抛会进全局未处理异常；记日志后继续复位。
+                    Logger.LogWarning($"输入法提示：淡出隐藏失败: {ex.Message}");
+                }
+                finally
+                {
+                    Opacity = TargetOpacity;
+                }
+            });
+        }
+
+        /// <summary>
+        /// 立即隐藏并清除动画（截图前需要干净画面的路径专用）。
+        /// 正常隐藏（自动隐藏、失焦、切换输入法）走 <see cref="HideBadge"/> 的淡出；
+        /// 截图若走淡出，抓屏时仍会拍到半透明的角标。
+        /// </summary>
+        public void HideImmediately()
+        {
+            _fadeToken++;
+            BeginAnimation(OpacityProperty, null);
+            Opacity = TargetOpacity;
+
+            // 已被关闭或本就不可见时直接返回：对已关闭窗口调用 Hide 会抛异常。
             if (IsVisible)
                 Hide();
-            Opacity = 1;
+        }
+
+        /// <summary>
+        /// 将窗口不透明度平滑过渡到 <paramref name="to"/>。
+        /// <para>
+        /// 关键顺序：先读 <see cref="UIElement.Opacity"/>（依赖属性 getter 返回当前动画的评估值，
+        /// 因此重复调用能从「此刻看得见的值」过渡）→ 再写 base 值 → 最后启动动画。
+        /// 先写 base 值保证动画结束或被移除后属性落在目标值，不会被旧值永久劫持。
+        /// </para>
+        /// </summary>
+        /// <param name="holdEnd">true 时动画结束后保持目标值，等待回调移除动画（淡出用）。</param>
+        /// <param name="completed">动画自然结束后的回调（UI 线程）。</param>
+        private void AnimateOpacity(double to, int durationMs, bool holdEnd = false, Action? completed = null)
+        {
+            double from = Opacity;
+            Opacity = to;
+
+            var animation = new DoubleAnimation(from, to, TimeSpan.FromMilliseconds(durationMs))
+            {
+                // 淡入用 Stop：结束后由 base 值接管，不留动画持有属性；
+                // 淡出用 HoldEnd：保持透明到 Completed 回调摘掉动画并隐藏，避免中途闪回。
+                FillBehavior = holdEnd ? FillBehavior.HoldEnd : FillBehavior.Stop,
+            };
+
+            if (completed != null)
+                animation.Completed += (s, e) => completed();
+
+            BeginAnimation(OpacityProperty, animation);
         }
 
         /// <summary>
