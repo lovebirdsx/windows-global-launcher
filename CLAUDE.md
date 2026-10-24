@@ -236,3 +236,4 @@ dotnet test --filter "FullyQualifiedName~CommandNameWithHotKeyConverter"  # 运�
 ## 其它
 
 - 修改或者新增功能，有必要的话，则同步更新CLAUDE.md和README.md
+- 做完任务，生成提交信息，保持简洁，**不要包含 AI/工具署名水印**（如 `Co-Authored-By: Claude <noreply@anthropic.com>`）
