@@ -168,7 +168,14 @@ namespace CommandLauncher
         private Config _config = new();
 
         private FileSystemWatcher? _fileWatcher;
-        private DateTime _lastWriteTime = DateTime.MinValue;
+
+        // 上次成功加载（或自己写出）的文件原文。watcher 去重以内容为准而不是时间戳：
+        // 部分编辑器/工具保存时会保留原 mtime，按 LastWriteTime 判定会把真实修改全部漏掉。
+        private string? _lastLoadedRaw;
+
+        // 重载判定与加载串行化：FileSystemWatcher 的事件在线程池上并发投递，
+        // 原子替换一次保存会同时产生 Renamed/Created 等多个通知，不加锁会重复加载。
+        private readonly object _reloadLock = new();
 
         // 自身写盘后的 watcher 回声抑制窗口（Environment.TickCount64 毫秒刻度）。
         // SaveConfig 写盘前设置，OnConfigFileChanged 在其内直接忽略：写盘后再更新时间戳存在竞态
@@ -239,6 +246,7 @@ namespace CommandLauncher
                         profile.Mappings ??= [];
                     }
                     _config = config;
+                    _lastLoadedRaw = json;
                     Logger.LogInfo($"成功加载配置文件，包含 {config.Commands.Count} 个命令");
 
                     // 触发配置更新事件
@@ -294,11 +302,16 @@ namespace CommandLauncher
 
                 _fileWatcher = new FileSystemWatcher(configDir, configFileName)
                 {
-                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size,
+                    // FileName 通知是「原子替换」式保存（写临时文件后重命名/替换目标）唯一可靠的信号：
+                    // 这类写入不产生 LastWrite/Size 的 Changed 通知，只表现为 Renamed/Created，
+                    // 只监听 Changed 会漏掉 VS Code 等编辑器保存的配置。
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName,
                     EnableRaisingEvents = true
                 };
 
                 _fileWatcher.Changed += OnConfigFileChanged;
+                _fileWatcher.Created += OnConfigFileChanged;
+                _fileWatcher.Renamed += OnConfigFileChanged;
                 Logger.LogInfo("开始监听配置文件变化");
             }
             catch (Exception ex)
@@ -313,6 +326,8 @@ namespace CommandLauncher
             {
                 _fileWatcher.EnableRaisingEvents = false;
                 _fileWatcher.Changed -= OnConfigFileChanged;
+                _fileWatcher.Created -= OnConfigFileChanged;
+                _fileWatcher.Renamed -= OnConfigFileChanged;
                 _fileWatcher.Dispose();
                 _fileWatcher = null;
                 Logger.LogInfo("停止监听配置文件变化");
@@ -327,18 +342,26 @@ namespace CommandLauncher
                 if (Environment.TickCount64 < _suppressWatcherReloadUntil)
                     return;
 
-                // 防止重复触发
-                var lastWrite = File.GetLastWriteTime(ConfigPath);
-                if (lastWrite <= _lastWriteTime.AddMilliseconds(100))
-                    return;
-                
-                _lastWriteTime = lastWrite;
-                
                 // 延迟一点时间，确保文件写入完成
                 System.Threading.Thread.Sleep(100);
-                
-                Logger.LogInfo("检测到配置文件变化，正在重新加载...");
-                LoadConfig();
+
+                // 原子替换过程中目标文件会短暂不存在（Renamed 可能先于内容就绪），此时放弃本次：
+                // 后续 Created/Renamed 通知会再次进入，不能在这里加载（读不到文件会退回默认配置）。
+                if (!File.Exists(ConfigPath))
+                    return;
+
+                var json = File.ReadAllText(ConfigPath);
+
+                lock (_reloadLock)
+                {
+                    // 以内容而不是时间戳判定变化：保留 mtime 的保存方式不会更新 LastWriteTime，
+                    // 旧实现按 mtime 去重会把这些真实修改全部漏掉。
+                    if (json == _lastLoadedRaw)
+                        return;
+
+                    Logger.LogInfo("检测到配置文件变化，正在重新加载...");
+                    LoadConfig();
+                }
             }
             catch (Exception ex)
             {
@@ -485,7 +508,9 @@ namespace CommandLauncher
 
                 _suppressWatcherReloadUntil = Environment.TickCount64 + 1000;
                 File.WriteAllText(ConfigPath, json);
-                _lastWriteTime = File.GetLastWriteTime(ConfigPath);
+                // 磁盘内容已与内存一致：即使抑制窗口过期后才收到自己写入的回声，
+                // 内容比较也会跳过，不会把自身保存误判为外部修改。
+                _lastLoadedRaw = json;
                 Logger.LogInfo("配置文件保存成功");
                 return true;
             }
