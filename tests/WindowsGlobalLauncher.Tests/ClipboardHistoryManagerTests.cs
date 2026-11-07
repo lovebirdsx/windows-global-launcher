@@ -164,7 +164,7 @@ public class ClipboardHistoryManagerTests
     [Fact]
     public void SortForDisplay_PinnedFirstThenTimestampDescending()
     {
-        // 覆盖无搜索（Query("")）的排序路径
+        // 覆盖「置顶优先」模式与搜索结果共用的排序路径
         var unpinnedNew = TextEntry("未置顶 新", 1);
         var pinnedOld = PinnedEntry("置顶 旧", 30);
         var pinnedNew = PinnedEntry("置顶 新", 2);
@@ -173,6 +173,38 @@ public class ClipboardHistoryManagerTests
         var result = ClipboardHistoryManager.SortForDisplay([unpinnedNew, pinnedOld, unpinnedOld, pinnedNew]);
 
         Assert.Equal(new[] { pinnedNew, pinnedOld, unpinnedNew, unpinnedOld }, result);
+    }
+
+    [Fact]
+    public void SortByTimestampDescending_IgnoresPinAndOrdersPurelyByTime()
+    {
+        // 默认「最近优先」模式：置顶旧项留在时间位置，不再置顶优先
+        var pinnedOld = PinnedEntry("置顶 旧", 30);
+        var unpinnedNew = TextEntry("未置顶 新", 1);
+        var unpinnedOld = TextEntry("未置顶 旧", 20);
+
+        var result = ClipboardHistoryManager.SortByTimestampDescending([pinnedOld, unpinnedNew, unpinnedOld]);
+
+        Assert.Equal(new[] { unpinnedNew, unpinnedOld, pinnedOld }, result);
+    }
+
+    [Fact]
+    public void SortByTimestampDescending_KeepsInputOrderForEqualTimestamp()
+    {
+        // 同一时间戳（快速连续复制）走 LINQ 稳定排序，保持传入顺序（_entries 头部最新）
+        var pinned = PinnedEntry("相同时间 置顶", 5);
+        var unpinnedFirst = TextEntry("相同时间 一", 5);
+        var unpinnedSecond = TextEntry("相同时间 二", 5);
+
+        var result = ClipboardHistoryManager.SortByTimestampDescending([pinned, unpinnedFirst, unpinnedSecond]);
+
+        Assert.Equal(new[] { pinned, unpinnedFirst, unpinnedSecond }, result);
+    }
+
+    [Fact]
+    public void SortByTimestampDescending_EmptyInputReturnsEmpty()
+    {
+        Assert.Empty(ClipboardHistoryManager.SortByTimestampDescending([]));
     }
 
     [Fact]

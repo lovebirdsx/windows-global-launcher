@@ -237,19 +237,21 @@ namespace CommandLauncher
             => a.IsImage == b.IsImage && (a.IsImage ? a.ContentHash == b.ContentHash : a.Text == b.Text);
 
         /// <summary>
-        /// 查询历史（置顶优先，组内按时间倒序）。filter 非空时对文本条目做模糊匹配，
-        /// 命中结果同样置顶优先、组内按粘贴时间倒序；图片条目不参与搜索。
+        /// 查询历史。filter 为空时按 <paramref name="pinnedFirst"/> 选择排序：
+        /// true = 置顶优先（组内时间倒序），false = 纯时间倒序（置顶项也参与时间排序）。
+        /// filter 非空时对文本条目做模糊匹配，命中结果**始终置顶优先**、组内按粘贴时间倒序，
+        /// 忽略 <paramref name="pinnedFirst"/>（搜索行为与旧版一致）；图片条目不参与搜索。
         /// </summary>
-        public List<ClipboardEntry> Query(string filter)
+        public List<ClipboardEntry> Query(string filter, bool pinnedFirst)
         {
             if (string.IsNullOrWhiteSpace(filter))
-                return SortForDisplay(_entries);
+                return pinnedFirst ? SortForDisplay(_entries) : SortByTimestampDescending(_entries);
 
             return MatchFilter(_entries, filter.Trim());
         }
 
         /// <summary>
-        /// 按文本模糊匹配过滤（图片条目不参与），命中结果置顶优先、组内按 Timestamp 倒序；
+        /// 按文本模糊匹配过滤（图片条目不参与），命中结果**始终置顶优先**（与 Tab 排序模式无关）、组内按 Timestamp 倒序；
         /// filter 须已 Trim 且非空。匹配分数只用于判定是否命中、不参与排序（纯静态函数，供单测）。
         /// </summary>
         public static List<ClipboardEntry> MatchFilter(IReadOnlyList<ClipboardEntry> entries, string filter)
@@ -268,7 +270,7 @@ namespace CommandLauncher
         }
 
         /// <summary>
-        /// 展示排序：置顶条目在前，组内按 Timestamp 倒序。
+        /// 置顶优先排序（「置顶优先」模式与搜索结果共用）：置顶条目在前，组内按 Timestamp 倒序。
         /// LINQ OrderByDescending 为稳定排序：Timestamp 相同时保持传入顺序（_entries 头部最新）。
         /// 不要改用 List.Sort（不稳定，同毫秒时间戳会乱序）。
         /// </summary>
@@ -276,6 +278,13 @@ namespace CommandLauncher
             => entries.OrderByDescending(e => e.IsPinned)
                       .ThenByDescending(e => e.Timestamp)
                       .ToList();
+
+        /// <summary>
+        /// 纯时间倒序（默认「最近优先」模式使用）：置顶与未置顶条目一视同仁，只按 Timestamp 降序。
+        /// LINQ 稳定排序：Timestamp 相同时保持传入顺序（_entries 头部最新）；配套单测见 ClipboardHistoryManagerTests。
+        /// </summary>
+        public static List<ClipboardEntry> SortByTimestampDescending(IEnumerable<ClipboardEntry> entries)
+            => entries.OrderByDescending(e => e.Timestamp).ToList();
 
         /// <summary>判断置顶数量是否已达上限（只统计已置顶条目；取消置顶永远允许）。</summary>
         public static bool IsPinLimitReached(IReadOnlyList<ClipboardEntry> entries)

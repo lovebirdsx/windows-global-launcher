@@ -28,7 +28,8 @@ namespace CommandLauncher
         public DateTime Timestamp { get; set; }
 
         /// <summary>
-        /// 是否置顶。置顶条目始终排在列表最前，且不会被 MaxEntries 自动淘汰。
+        /// 是否置顶。置顶优先模式下排在最前，且不会被 MaxEntries 自动淘汰；
+        /// 默认的「最近优先」模式中仍按复制时间参与排序，仅行尾显示图钉。
         /// 旧版 JSON 缺少该字段时反序列化为 false，无需迁移。
         /// </summary>
         public bool IsPinned { get; set; }

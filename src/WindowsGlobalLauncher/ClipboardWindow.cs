@@ -18,7 +18,8 @@ namespace CommandLauncher
     /// 紧凑版深色风格（与命令启动器一致）：顶部搜索框模糊过滤，↑↓/Ctrl+P/Ctrl+N 选择，
     /// 回车把选中条目粘贴回弹出前的前台窗口，Ctrl+Enter / 右键菜单切换置顶，
     /// Delete 删除条目（置顶条目须先取消置顶），Esc/失焦取消。
-    /// 列表置顶优先、组内按时间倒序；置顶条目行尾显示图钉。
+    /// 列表默认按纯时间倒序（置顶条目也参与），裸 Tab 切换「最近优先 / 置顶优先」；
+    /// 搜索时结果始终置顶优先、不受 Tab 模式影响；置顶条目行尾显示图钉。
     /// 弹出位置优先取前台窗口的插入符位置，取不到时回退到鼠标所在屏幕居中。
     /// </summary>
     public class ClipboardWindow : Window
@@ -38,8 +39,12 @@ namespace CommandLauncher
         #endregion
 
         private const double WindowWidth = 480;
-        private const double WindowHeight = 420;
-        private const double RowHeight = 34;
+        private const double WindowHeight = 560;
+        private const double RowHeight = 28;
+
+        // 搜索框占位提示按当前排序模式切换（输入内容后照旧隐藏）
+        private const string PlaceholderRecentFirst = "搜索（最近优先 · Tab 切换 · Enter 粘贴 · Del 删除）";
+        private const string PlaceholderPinnedFirst = "搜索（置顶优先 · Tab 切换 · Enter 粘贴 · Del 删除）";
 
         // 图片预览窗的尺寸上限（同时受屏幕工作区比例限制，见 ShowImagePreview）
         private const double MaxPreviewWidth = 720;
@@ -62,6 +67,9 @@ namespace CommandLauncher
         private MenuItem _pinMenuItem = null!;
         // 右键点空白处时抑制本次菜单弹出（避免对别的条目误操作）
         private bool _suppressNextContextMenu;
+
+        // false = 最近优先（默认，纯时间倒序），true = 置顶优先；仅本窗口实例内记忆，不写 AppState
+        private bool _pinnedFirst;
 
         // 列表底部临时提示条（置顶上限、删除守卫等），约 2 秒后自动隐藏
         private Border _hintBorder = null!;
@@ -208,18 +216,18 @@ namespace CommandLauncher
 
             _placeholder = new TextBlock
             {
-                Text = "搜索（↑↓ 选择，Enter 粘贴，Ctrl+Enter 置顶，Del 删除）",
                 FontSize = 14,
                 Padding = new Thickness(12, 5, 12, 5),
                 Foreground = new SolidColorBrush(Color.FromArgb(255, 150, 150, 150)),
                 VerticalAlignment = VerticalAlignment.Top,
                 IsHitTestVisible = false,
             };
+            UpdatePlaceholder(); // 初始为「最近优先」提示，之后随 Tab 切换模式更新
 
             // 列表项样式
             var itemStyle = new Style(typeof(ListBoxItem));
-            itemStyle.Setters.Add(new Setter(PaddingProperty, new Thickness(10, 4, 10, 4)));
-            itemStyle.Setters.Add(new Setter(MarginProperty, new Thickness(2)));
+            itemStyle.Setters.Add(new Setter(PaddingProperty, new Thickness(10, 3, 10, 3)));
+            itemStyle.Setters.Add(new Setter(MarginProperty, new Thickness(1)));
             itemStyle.Setters.Add(new Setter(BackgroundProperty, Brushes.Transparent));
             itemStyle.Setters.Add(new Setter(BorderThicknessProperty, new Thickness(0)));
             itemStyle.Setters.Add(new Setter(HeightProperty, RowHeight));
@@ -238,9 +246,9 @@ namespace CommandLauncher
 
             var thumbnail = new FrameworkElementFactory(typeof(Image));
             thumbnail.SetValue(DockPanel.DockProperty, Dock.Left);
-            thumbnail.SetValue(WidthProperty, 26.0);
-            thumbnail.SetValue(HeightProperty, 26.0);
-            thumbnail.SetValue(MarginProperty, new Thickness(0, 0, 10, 0));
+            thumbnail.SetValue(WidthProperty, 20.0);
+            thumbnail.SetValue(HeightProperty, 20.0);
+            thumbnail.SetValue(MarginProperty, new Thickness(0, 0, 8, 0));
             thumbnail.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
             thumbnail.SetValue(Image.StretchProperty, Stretch.Uniform);
             // 缩略图按需解码：绑定源是条目本身，转换器在行被实例化（含虚拟化预取页）时才读盘解码，
@@ -271,7 +279,7 @@ namespace CommandLauncher
 
             var preview = new FrameworkElementFactory(typeof(TextBlock));
             preview.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
-            preview.SetValue(TextBlock.FontSizeProperty, 13.0);
+            preview.SetValue(TextBlock.FontSizeProperty, 12.0);
             preview.SetValue(TextBlock.ForegroundProperty, Brushes.White);
             preview.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
             preview.SetBinding(TextBlock.TextProperty, new Binding("Preview"));
@@ -351,6 +359,10 @@ namespace CommandLauncher
             root.Child = grid;
             Content = root;
         }
+
+        /// <summary>按当前排序模式刷新搜索框占位提示（输入内容后提示由 TextChanged 隐藏，此处只管文本）。</summary>
+        private void UpdatePlaceholder()
+            => _placeholder.Text = _pinnedFirst ? PlaceholderPinnedFirst : PlaceholderRecentFirst;
 
         /// <summary>唤出窗口（热键动作入口）。已可见时再按一次则关闭（切换式）。</summary>
         public void ShowHistory()
@@ -576,7 +588,7 @@ namespace CommandLauncher
             var previousEntry = _list.SelectedItem as ClipboardEntry;
 
             _items.Clear();
-            foreach (var entry in ClipboardHistoryManager.Instance.Query(_searchBox.Text))
+            foreach (var entry in ClipboardHistoryManager.Instance.Query(_searchBox.Text, _pinnedFirst))
                 _items.Add(entry);
 
             _emptyHint.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Hidden;
@@ -596,7 +608,7 @@ namespace CommandLauncher
             }
         }
 
-        #region 键盘交互（↑↓/Ctrl+P/Ctrl+N 移动，回车粘贴，Ctrl+Enter 置顶，Esc 取消，Delete 删除）
+        #region 键盘交互（↑↓/Ctrl+P/Ctrl+N 移动，回车粘贴，Ctrl+Enter 置顶，Esc 取消，Delete 删除，Tab 切换排序）
 
         // 挂在窗口级而非搜索框（命令启动器仍挂搜索框级，此处是剪贴板窗口的有意差异）：
         // 鼠标点过列表项后键盘焦点落到 ListBoxItem，搜索框级处理器收不到按键，Delete/↑↓/Enter/Esc
@@ -637,6 +649,28 @@ namespace CommandLauncher
                 DeleteSelected();
                 e.Handled = true;
             }
+            else if (e.Key == Key.Tab && Keyboard.Modifiers == ModifierKeys.None)
+            {
+                // 只处理裸 Tab（在「最近优先 / 置顶优先」间切换）；
+                // Shift+Tab 放行给 WPF 默认焦点导航，Ctrl/Alt/Win+Tab 不处理。
+                // 自动重复也必须吞掉（否则会放行焦点导航），但只在首次按下时翻转，
+                // 避免长按 Tab 时列表被反复重排。
+                if (!e.IsRepeat)
+                    ToggleSortMode();
+                e.Handled = true;
+            }
+        }
+
+        /// <summary>
+        /// 切换排序模式（裸 Tab）：翻转后更新占位提示；搜索框有内容时不刷新列表
+        /// （搜索结果始终置顶优先、与模式无关），清空搜索时 TextChanged 触发的刷新会应用新模式。
+        /// </summary>
+        private void ToggleSortMode()
+        {
+            _pinnedFirst = !_pinnedFirst;
+            UpdatePlaceholder();
+            if (string.IsNullOrWhiteSpace(_searchBox.Text))
+                RefreshList();
         }
 
         private void MoveSelection(int direction)
