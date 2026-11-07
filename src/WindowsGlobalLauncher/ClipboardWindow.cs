@@ -16,7 +16,9 @@ namespace CommandLauncher
     /// <summary>
     /// 剪贴板历史弹出窗口（默认热键 Ctrl+Alt+C，见 WindowActions.ShowClipboardHistory）。
     /// 紧凑版深色风格（与命令启动器一致）：顶部搜索框模糊过滤，↑↓/Ctrl+P/Ctrl+N 选择，
-    /// 回车把选中条目粘贴回弹出前的前台窗口，Delete 删除条目，Esc/失焦取消。
+    /// 回车把选中条目粘贴回弹出前的前台窗口，Ctrl+Enter / 右键菜单切换置顶，
+    /// Delete 删除条目（置顶条目须先取消置顶），Esc/失焦取消。
+    /// 列表置顶优先、组内按时间倒序；置顶条目行尾显示图钉。
     /// 弹出位置优先取前台窗口的插入符位置，取不到时回退到鼠标所在屏幕居中。
     /// </summary>
     public class ClipboardWindow : Window
@@ -55,6 +57,16 @@ namespace CommandLauncher
         private TextBlock _placeholder = null!;
         private TextBlock _emptyHint = null!;
         private readonly ListBox _list = CreateList();
+
+        // 右键菜单中的「置顶/取消置顶」项（标题在 ContextMenuOpening 时按选中条目切换）
+        private MenuItem _pinMenuItem = null!;
+        // 右键点空白处时抑制本次菜单弹出（避免对别的条目误操作）
+        private bool _suppressNextContextMenu;
+
+        // 列表底部临时提示条（置顶上限、删除守卫等），约 2 秒后自动隐藏
+        private Border _hintBorder = null!;
+        private TextBlock _hintText = null!;
+        private readonly DispatcherTimer _hintTimer;
 
         // 预览窗：选中条目时跟随弹出（图片显原图，长文本显完整内容），ShowActivated=false 不抢焦点
         private readonly Window _previewWindow;
@@ -124,6 +136,14 @@ namespace CommandLauncher
             _activationTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ActivationRetryIntervalMs) };
             _activationTimer.Tick += (s, e) => TryActivateOnce();
 
+            // 列表底部临时提示条：显示后 2 秒自动隐藏
+            _hintTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _hintTimer.Tick += (s, e) =>
+            {
+                _hintTimer.Stop();
+                _hintBorder.Visibility = Visibility.Collapsed;
+            };
+
             // 提前创建句柄，保证未显示时也能取到 DPI 做坐标换算
             new WindowInteropHelper(this).EnsureHandle();
 
@@ -188,7 +208,7 @@ namespace CommandLauncher
 
             _placeholder = new TextBlock
             {
-                Text = "输入字符搜索（↑↓ 选择，回车粘贴，Delete 删除）",
+                Text = "搜索（↑↓ 选择，Enter 粘贴，Ctrl+Enter 置顶，Del 删除）",
                 FontSize = 14,
                 Padding = new Thickness(12, 5, 12, 5),
                 Foreground = new SolidColorBrush(Color.FromArgb(255, 150, 150, 150)),
@@ -236,6 +256,19 @@ namespace CommandLauncher
             time.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromArgb(255, 120, 120, 120)));
             time.SetBinding(TextBlock.TextProperty, new Binding("Timestamp") { Converter = new TimeAgoConverter() });
 
+            // 置顶图钉：Dock.Right 且排在相对时间之后，实际显示在行尾、相对时间左侧；
+            // 浅黄色在普通深色行与选中蓝底上都可见。Visibility 由 IsPinned 驱动，图钉不改变行背景。
+            var pin = new FrameworkElementFactory(typeof(TextBlock));
+            pin.SetValue(DockPanel.DockProperty, Dock.Right);
+            pin.SetValue(TextBlock.FontFamilyProperty, new FontFamily("Segoe MDL2 Assets"));
+            pin.SetValue(TextBlock.TextProperty, "\uE718");
+            pin.SetValue(TextBlock.FontSizeProperty, 11.0);
+            pin.SetValue(TextBlock.ForegroundProperty, new SolidColorBrush(Color.FromArgb(255, 255, 212, 0)));
+            pin.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+            pin.SetValue(ToolTipProperty, "已置顶");
+            pin.SetValue(MarginProperty, new Thickness(8, 0, 0, 0));
+            pin.SetBinding(VisibilityProperty, new Binding("IsPinned") { Converter = new BooleanToVisibilityConverter() });
+
             var preview = new FrameworkElementFactory(typeof(TextBlock));
             preview.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
             preview.SetValue(TextBlock.FontSizeProperty, 13.0);
@@ -245,6 +278,7 @@ namespace CommandLauncher
 
             dock.AppendChild(thumbnail);
             dock.AppendChild(time);
+            dock.AppendChild(pin);
             dock.AppendChild(preview);
             template.VisualTree = dock;
             _list.ItemTemplate = template;
@@ -255,6 +289,14 @@ namespace CommandLauncher
         ScrollViewer.SetHorizontalScrollBarVisibility(_list, ScrollBarVisibility.Disabled);
             _list.ItemsSource = _items;
             _list.MouseDoubleClick += (s, e) => PasteSelected();
+
+            // 右键菜单：单个「置顶/取消置顶」项，标题在 ContextMenuOpening 时按选中条目切换。
+            // 右键先选中鼠标下条目；点在空白处则抑制菜单，避免误操作别的条目。
+            _pinMenuItem = new MenuItem();
+            _pinMenuItem.Click += (s, e) => TogglePinSelected();
+            _list.ContextMenu = new ContextMenu { Items = { _pinMenuItem } };
+            _list.PreviewMouseRightButtonDown += OnListPreviewMouseRightButtonDown;
+            _list.ContextMenuOpening += OnListContextMenuOpening;
 
             // 空历史提示
             _emptyHint = new TextBlock
@@ -280,9 +322,30 @@ namespace CommandLauncher
             grid.Children.Add(_searchBox);
             grid.Children.Add(_placeholder);
 
+            // 列表底部临时提示条（置顶上限/删除守卫）：居中浮层，不参与命中测试，避免挡鼠标操作列表
+            _hintText = new TextBlock
+            {
+                FontSize = 12,
+                Foreground = Brushes.White,
+                TextWrapping = TextWrapping.NoWrap,
+            };
+            _hintBorder = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(230, 20, 20, 20)),
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(12, 6, 12, 6),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Margin = new Thickness(0, 0, 0, 8),
+                IsHitTestVisible = false,
+                Visibility = Visibility.Collapsed,
+                Child = _hintText,
+            };
+
             var listArea = new Grid { Margin = new Thickness(0, 42, 0, 0) };
             listArea.Children.Add(_list);
             listArea.Children.Add(_emptyHint);
+            listArea.Children.Add(_hintBorder);
             grid.Children.Add(listArea);
 
             root.Child = grid;
@@ -367,6 +430,14 @@ namespace CommandLauncher
         private void HideWindow()
         {
             _activationTimer.Stop();
+            // 停掉提示条计时并隐藏，避免下次唤出残留上一次的提示
+            _hintTimer.Stop();
+            _hintBorder.Visibility = Visibility.Collapsed;
+            // 关闭可能仍打开的右键菜单：主窗口隐藏后菜单不应继续悬浮，否则点击菜单项会操作已隐藏的窗口
+            if (_list.ContextMenu is { IsOpen: true } menu)
+                menu.IsOpen = false;
+            // 复位空白处右键留下的抑制标记，避免下一次键盘菜单被误吞
+            _suppressNextContextMenu = false;
             Hide();
             _previewWindow.Hide();
             _searchBox.Text = "";
@@ -493,14 +564,16 @@ namespace CommandLauncher
 
         /// <summary>
         /// 刷新列表。resetSelection=true 表示「隐藏→显示」的唤出路径：选中重置回第一条并滚到顶部
-        /// （与命令启动器 ShowWindow 的 ScrollCommandListToTop 惯例一致）；默认保留当前选中索引，
-        /// 供可见态增量刷新使用（Delete 删除后选中下一条等体验依赖该语义）。
+        /// （与命令启动器 ShowWindow 的 ScrollCommandListToTop 惯例一致）；默认按条目对象保持选中，
+        /// 供可见态增量刷新使用——置顶/取消置顶会让条目在列表中移动，按对象找回才能让选中项跟随该条目，
+        /// 找不到时（如刚被 Delete）回退到原索引（Delete 删除后选中下一条等体验依赖该语义）。
         /// 缩略图不在此处解码：Image.Source 绑定条目 + ThumbnailConverter，由列表虚拟化在行实例化时按需加载
         /// （上限 1000 时全量预解码会让唤出同步冻结）。查询结果与 _entries 共享条目实例，故缩略图缓存跨刷新生效。
         /// </summary>
         private void RefreshList(bool resetSelection = false)
         {
-            int previousIndex = resetSelection ? 0 : Math.Max(_list.SelectedIndex, 0);
+            int previousIndex = Math.Max(_list.SelectedIndex, 0);
+            var previousEntry = _list.SelectedItem as ClipboardEntry;
 
             _items.Clear();
             foreach (var entry in ClipboardHistoryManager.Instance.Query(_searchBox.Text))
@@ -509,12 +582,21 @@ namespace CommandLauncher
             _emptyHint.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Hidden;
             if (_items.Count > 0)
             {
-                _list.SelectedIndex = Math.Min(previousIndex, _items.Count - 1);
+                int targetIndex;
+                if (resetSelection)
+                    targetIndex = 0;
+                else
+                {
+                    targetIndex = previousEntry != null ? _items.IndexOf(previousEntry) : -1;
+                    if (targetIndex < 0)
+                        targetIndex = Math.Min(previousIndex, _items.Count - 1);
+                }
+                _list.SelectedIndex = targetIndex;
                 _list.ScrollIntoView(_list.SelectedItem);
             }
         }
 
-        #region 键盘交互（↑↓/Ctrl+P/Ctrl+N 移动，回车执行，Esc 取消，Delete 删除）
+        #region 键盘交互（↑↓/Ctrl+P/Ctrl+N 移动，回车粘贴，Ctrl+Enter 置顶，Esc 取消，Delete 删除）
 
         // 挂在窗口级而非搜索框（命令启动器仍挂搜索框级，此处是剪贴板窗口的有意差异）：
         // 鼠标点过列表项后键盘焦点落到 ListBoxItem，搜索框级处理器收不到按键，Delete/↑↓/Enter/Esc
@@ -532,6 +614,12 @@ namespace CommandLauncher
             else if (e.Key == Key.Up || (ctrl && e.Key == Key.P))
             {
                 MoveSelection(-1);
+                e.Handled = true;
+            }
+            else if (ctrl && e.Key == Key.Enter)
+            {
+                // 必须排在回车粘贴分支之前：Ctrl+Enter 切换置顶，不能被粘贴分支吞掉
+                TogglePinSelected();
                 e.Handled = true;
             }
             else if (e.Key == Key.Enter)
@@ -571,6 +659,61 @@ namespace CommandLauncher
 
         #endregion
 
+        /// <summary>右键按下时先选中鼠标下的条目；点在空白处则抑制本次右键菜单，避免误操作别的条目。</summary>
+        private void OnListPreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var container = e.OriginalSource is DependencyObject source
+                ? ItemsControl.ContainerFromElement(_list, source) as ListBoxItem
+                : null;
+            if (container != null)
+            {
+                _suppressNextContextMenu = false;
+                container.IsSelected = true;
+            }
+            else
+            {
+                _suppressNextContextMenu = true;
+            }
+        }
+
+        /// <summary>右键菜单打开前按选中条目切换标题；无有效目标时抑制弹出。</summary>
+        private void OnListContextMenuOpening(object sender, ContextMenuEventArgs e)
+        {
+            bool suppressed = _suppressNextContextMenu;
+            _suppressNextContextMenu = false;
+            if (suppressed || _list.SelectedItem is not ClipboardEntry entry)
+            {
+                e.Handled = true;
+                return;
+            }
+            _pinMenuItem.Header = entry.IsPinned ? "取消置顶" : "置顶";
+        }
+
+        /// <summary>切换选中条目的置顶状态（Ctrl+Enter / 右键菜单）；达到上限时在列表底部提示。</summary>
+        private void TogglePinSelected()
+        {
+            if (_list.SelectedItem is not ClipboardEntry entry)
+                return;
+            switch (ClipboardHistoryManager.Instance.TogglePin(entry))
+            {
+                case PinToggleResult.LimitReached:
+                    ShowHint($"置顶数量已达上限（{ClipboardHistoryManager.MaxPinnedEntries} 条）");
+                    break;
+                case PinToggleResult.NotFound:
+                    Logger.LogInfo("切换剪贴板置顶失败：条目已不在历史中");
+                    break;
+            }
+        }
+
+        /// <summary>在列表底部短暂显示提示（2 秒后自动隐藏，窗口隐藏时立即收起）。</summary>
+        private void ShowHint(string message)
+        {
+            _hintText.Text = message;
+            _hintBorder.Visibility = Visibility.Visible;
+            _hintTimer.Stop();
+            _hintTimer.Start();
+        }
+
         private void PasteSelected()
         {
             if (_list.SelectedItem is not ClipboardEntry entry)
@@ -582,7 +725,7 @@ namespace CommandLauncher
         }
 
         // 先把内容写回剪贴板，再把焦点还给弹出前的前台窗口，最后模拟 Ctrl+V。
-        // 写剪贴板会触发一次剪贴板监听，相同内容去重置顶，无副作用。
+        // 写剪贴板会触发一次剪贴板监听，相同内容去重并刷新时间，无副作用。
         private async void PasteEntryAsync(ClipboardEntry entry, IntPtr target)
         {
             try
@@ -610,7 +753,15 @@ namespace CommandLauncher
         {
             if (_list.SelectedItem is not ClipboardEntry entry)
                 return;
-            ClipboardHistoryManager.Instance.Delete(entry); // 触发 HistoryChanged → RefreshList
+            // 置顶条目不允许直接删除（数据层 Delete 也有同样兜底），提示先取消置顶
+            if (entry.IsPinned)
+            {
+                ShowHint("置顶条目请先取消置顶（Ctrl+Enter）");
+                return;
+            }
+            // 数据层对置顶条目也会返回 false；UI 侧已提前提示，正常路径不会走到这里
+            if (!ClipboardHistoryManager.Instance.Delete(entry)) // 成功时触发 HistoryChanged → RefreshList
+                Logger.LogInfo("删除剪贴板条目失败：条目已不在历史中");
         }
 
         #region 弹出位置（优先插入符，失败回退鼠标屏幕居中）

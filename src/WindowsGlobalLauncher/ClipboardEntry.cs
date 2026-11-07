@@ -27,6 +27,12 @@ namespace CommandLauncher
 
         public DateTime Timestamp { get; set; }
 
+        /// <summary>
+        /// 是否置顶。置顶条目始终排在列表最前，且不会被 MaxEntries 自动淘汰。
+        /// 旧版 JSON 缺少该字段时反序列化为 false，无需迁移。
+        /// </summary>
+        public bool IsPinned { get; set; }
+
         /// <summary>单行预览文本（列表显示用，运行期计算，不持久化）。</summary>
         [JsonIgnore]
         public string Preview => IsImage

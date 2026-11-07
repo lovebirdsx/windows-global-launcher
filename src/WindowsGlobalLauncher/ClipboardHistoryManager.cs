@@ -11,16 +11,30 @@ using System.Windows.Media.Imaging;
 
 namespace CommandLauncher
 {
+    /// <summary>切换剪贴板条目置顶状态的结果。</summary>
+    public enum PinToggleResult
+    {
+        /// <summary>已成功切换并保存。</summary>
+        Toggled,
+        /// <summary>置顶数量已达上限，本次未切换。</summary>
+        LimitReached,
+        /// <summary>条目不在历史中（可能已被删除）。</summary>
+        NotFound,
+    }
+
     /// <summary>
     /// 剪贴板历史管理器：通过 AddClipboardFormatListener 监听系统剪贴板变化，
-    /// 记录文本与图片，按时间倒序保留最近 <see cref="MaxEntries"/> 条，重复内容置顶去重。
+    /// 记录文本与图片，按时间倒序保留最近 <see cref="MaxEntries"/> 条（置顶条目免淘汰），重复内容移到最前（去重）。
     /// 持久化仿 AppState 模式：元数据写 clipboard-history.json，图片写 clipboard-images\ 目录。
     /// 所有公开方法须在 UI 线程调用（剪贴板 API 要求 STA）。
     /// </summary>
     public class ClipboardHistoryManager : IDisposable
     {
-        /// <summary>最多保留的历史条数。</summary>
+        /// <summary>最多保留的历史总条数；超限时只淘汰未置顶条目，置顶条目不会被该上限自动清理。</summary>
         public const int MaxEntries = 1000;
+
+        /// <summary>最多可置顶的条目数（达到后拒绝新的置顶，取消置顶不受限制）。</summary>
+        public const int MaxPinnedEntries = 100;
 
         // 超过该长度的文本不记录（避免复制大文件内容时撑爆历史文件与内存）
         private const int MaxTextLength = 50_000;
@@ -47,7 +61,7 @@ namespace CommandLauncher
         private ClipboardListenerWindow? _window;
         private bool _disposed;
 
-        /// <summary>历史发生变化（新增/置顶/删除）时触发，供窗口刷新。</summary>
+        /// <summary>历史发生变化（新增/去重置前/置顶状态切换/删除）时触发，供窗口刷新。</summary>
         public event Action? HistoryChanged;
 
         private ClipboardHistoryManager()
@@ -170,7 +184,7 @@ namespace CommandLauncher
                     Timestamp = DateTime.Now,
                 };
 
-                // 已存在的相同图片直接置顶，不重复写文件
+                // 已存在的相同图片直接移到最前，不重复写文件
                 if (AddOrPromote(entry))
                 {
                     Directory.CreateDirectory(ImagesDir);
@@ -180,7 +194,7 @@ namespace CommandLauncher
         }
 
         /// <summary>
-        /// 插入新条目；若内容已存在则置顶并刷新时间（去重）。
+        /// 插入新条目；若内容已存在则移到最前并刷新时间（去重，保留原有置顶状态）。
         /// 返回 true 表示是全新条目（图片条目据此决定是否需要写 PNG 文件）。
         /// </summary>
         private bool AddOrPromote(ClipboardEntry entry)
@@ -198,12 +212,20 @@ namespace CommandLauncher
                 _entries.Insert(0, entry);
             }
 
-            // 超上限淘汰最旧条目，图片条目连同 PNG 文件一起清理
-            while (_entries.Count > MaxEntries)
+            // 超上限时只淘汰最旧的未置顶条目（置顶条目永不淘汰），图片条目连同 PNG 文件一起清理。
+            // 刚插入/刚提升的条目必须受保护：外部编辑可能把历史改成「超过上限且几乎全部置顶」，
+            // 若不保护，从尾部扫描到最后会把刚复制的内容立刻淘汰（图片还会留下孤儿 PNG）。
+            var inserted = existing ?? entry;
+            foreach (var evicted in SelectEvictions(_entries, inserted))
             {
-                var evicted = _entries[^1];
-                _entries.RemoveAt(_entries.Count - 1);
+                _entries.Remove(evicted);
                 DeleteImageFile(evicted);
+            }
+            if (_entries.Count > MaxEntries)
+            {
+                // 正常运行时受 MaxPinnedEntries 约束不会出现（置顶数远小于 MaxEntries）；
+                // 只有外部编辑把置顶数改到超限时才会走到这里，保留全部置顶、仅提示
+                Logger.LogWarning($"剪贴板历史超出上限 {MaxEntries} 条且无可淘汰的未置顶条目，当前共 {_entries.Count} 条（置顶 {_entries.Count(e => e.IsPinned)} 条）");
             }
 
             SaveHistory();
@@ -214,18 +236,21 @@ namespace CommandLauncher
         private static bool SameContent(ClipboardEntry a, ClipboardEntry b)
             => a.IsImage == b.IsImage && (a.IsImage ? a.ContentHash == b.ContentHash : a.Text == b.Text);
 
-        /// <summary>查询历史（时间倒序）。filter 非空时对文本条目做模糊匹配，命中结果按粘贴时间倒序；图片条目不参与搜索。</summary>
+        /// <summary>
+        /// 查询历史（置顶优先，组内按时间倒序）。filter 非空时对文本条目做模糊匹配，
+        /// 命中结果同样置顶优先、组内按粘贴时间倒序；图片条目不参与搜索。
+        /// </summary>
         public List<ClipboardEntry> Query(string filter)
         {
             if (string.IsNullOrWhiteSpace(filter))
-                return [.. _entries];
+                return SortForDisplay(_entries);
 
             return MatchFilter(_entries, filter.Trim());
         }
 
         /// <summary>
-        /// 按文本模糊匹配过滤（图片条目不参与），命中结果按 Timestamp 倒序；filter 须已 Trim 且非空。
-        /// 匹配分数只用于判定是否命中、不参与排序（纯静态函数，供单测）。
+        /// 按文本模糊匹配过滤（图片条目不参与），命中结果置顶优先、组内按 Timestamp 倒序；
+        /// filter 须已 Trim 且非空。匹配分数只用于判定是否命中、不参与排序（纯静态函数，供单测）。
         /// </summary>
         public static List<ClipboardEntry> MatchFilter(IReadOnlyList<ClipboardEntry> entries, string filter)
         {
@@ -239,19 +264,84 @@ namespace CommandLauncher
                 if (FuzzyMatcher.GetMatchScore(filter, target) > 0)
                     matched.Add(e);
             }
-            // LINQ OrderByDescending 为稳定排序：Timestamp 相同时保持传入顺序（_entries 头部最新）。
-            // 不要改用 List.Sort（不稳定，同毫秒时间戳会乱序）
-            return matched.OrderByDescending(e => e.Timestamp).ToList();
+            return SortForDisplay(matched);
         }
 
-        /// <summary>删除一条历史（图片条目连同文件删除）。</summary>
-        public void Delete(ClipboardEntry entry)
+        /// <summary>
+        /// 展示排序：置顶条目在前，组内按 Timestamp 倒序。
+        /// LINQ OrderByDescending 为稳定排序：Timestamp 相同时保持传入顺序（_entries 头部最新）。
+        /// 不要改用 List.Sort（不稳定，同毫秒时间戳会乱序）。
+        /// </summary>
+        public static List<ClipboardEntry> SortForDisplay(IEnumerable<ClipboardEntry> entries)
+            => entries.OrderByDescending(e => e.IsPinned)
+                      .ThenByDescending(e => e.Timestamp)
+                      .ToList();
+
+        /// <summary>判断置顶数量是否已达上限（只统计已置顶条目；取消置顶永远允许）。</summary>
+        public static bool IsPinLimitReached(IReadOnlyList<ClipboardEntry> entries)
+            => entries.Count(e => e.IsPinned) >= MaxPinnedEntries;
+
+        /// <summary>
+        /// 切换条目置顶状态。条目不在历史中返回 <see cref="PinToggleResult.NotFound"/>；
+        /// 未置顶且已达上限返回 <see cref="PinToggleResult.LimitReached"/>（不改状态、记 INFO 日志）；
+        /// 否则翻转状态、保存并通知刷新。
+        /// </summary>
+        public PinToggleResult TogglePin(ClipboardEntry entry)
         {
+            if (!_entries.Contains(entry))
+                return PinToggleResult.NotFound;
+
+            if (!entry.IsPinned && IsPinLimitReached(_entries))
+            {
+                Logger.LogInfo($"剪贴板置顶数量已达上限（{MaxPinnedEntries} 条），忽略本次置顶请求");
+                return PinToggleResult.LimitReached;
+            }
+
+            entry.IsPinned = !entry.IsPinned;
+            SaveHistory();
+            HistoryChanged?.Invoke();
+            return PinToggleResult.Toggled;
+        }
+
+        /// <summary>
+        /// 选出需要淘汰的条目：从列表尾部（最旧）向前，只收集未置顶条目，最多为溢出量条。
+        /// 置顶条目永不淘汰；未置顶条目不足时返回全部未置顶条目，由调用方判断并记 WARN（纯静态函数，供单测）。
+        /// </summary>
+        /// <param name="protectedEntry">
+        /// 刚插入/刚提升的条目，永不被选为淘汰对象。极端数据（外部编辑成全置顶且超限）下，
+        /// 它可能是列表中唯一的未置顶条目，保护它可以避免刚复制的内容被立即丢弃、图片留下孤儿 PNG。
+        /// </param>
+        public static List<ClipboardEntry> SelectEvictions(IReadOnlyList<ClipboardEntry> entries, ClipboardEntry? protectedEntry = null)
+        {
+            var evictions = new List<ClipboardEntry>();
+            int overflow = entries.Count - MaxEntries;
+            if (overflow <= 0)
+                return evictions;
+
+            for (int i = entries.Count - 1; i >= 0 && evictions.Count < overflow; i--)
+            {
+                if (ReferenceEquals(entries[i], protectedEntry))
+                    continue;
+                if (!entries[i].IsPinned)
+                    evictions.Add(entries[i]);
+            }
+            return evictions;
+        }
+
+        /// <summary>
+        /// 删除一条历史（图片条目连同文件删除）。置顶条目不会被删除并返回 false（数据层兜底，
+        /// UI 侧应提示用户先取消置顶）；非置顶条目删除成功返回 true。
+        /// </summary>
+        public bool Delete(ClipboardEntry entry)
+        {
+            if (entry.IsPinned)
+                return false;
             if (!_entries.Remove(entry))
-                return;
+                return false;
             DeleteImageFile(entry);
             SaveHistory();
             HistoryChanged?.Invoke();
+            return true;
         }
 
         /// <summary>把条目内容写回系统剪贴板（供粘贴前调用）。</summary>
@@ -355,10 +445,24 @@ namespace CommandLauncher
                     if (e.IsImage && !File.Exists(ImagePath(e.Id)))
                         continue;
                     _entries.Add(e);
-                    if (_entries.Count >= MaxEntries)
-                        break;
                 }
-                Logger.LogInfo($"已加载 {_entries.Count} 条剪贴板历史");
+
+                // 先加载全部有效条目，再从内存中移除超限的最旧非置顶条目；
+                // 加载阶段不删除 PNG 文件（与既有行为一致：超出上限的图片文件本就留在磁盘上）
+                foreach (var evicted in SelectEvictions(_entries))
+                    _entries.Remove(evicted);
+
+                int pinnedCount = _entries.Count(e => e.IsPinned);
+                Logger.LogInfo($"已加载 {_entries.Count} 条剪贴板历史（置顶 {pinnedCount} 条）");
+                if (pinnedCount > MaxPinnedEntries)
+                {
+                    // 外部编辑可能把置顶数改到超过上限：全部保留、不静默取消置顶，仅阻止继续新增
+                    Logger.LogWarning($"剪贴板历史置顶条目数（{pinnedCount}）超过上限 {MaxPinnedEntries}，已全部保留；取消部分置顶前无法新增置顶");
+                }
+                if (_entries.Count > MaxEntries)
+                {
+                    Logger.LogWarning($"剪贴板历史超出上限 {MaxEntries} 条且无可淘汰的未置顶条目，当前共 {_entries.Count} 条");
+                }
             }
             catch (Exception ex)
             {
