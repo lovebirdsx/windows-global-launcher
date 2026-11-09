@@ -13,12 +13,27 @@ using System.Windows.Threading;
 
 namespace CommandLauncher
 {
+    /// <summary>RefreshList 重填列表后的选中恢复方式。</summary>
+    internal enum RefreshSelection
+    {
+        /// <summary>按原选中条目对象找回；找不到时回退原索引（置顶/删除等增量刷新）。</summary>
+        KeepEntry,
+
+        /// <summary>只保持原索引位置（Tab 切换排序）：选中框留在原位置，不跟随原条目移动。</summary>
+        KeepIndex,
+
+        /// <summary>重置到第一条（唤出窗口）。</summary>
+        ResetToFirst,
+    }
+
     /// <summary>
     /// 剪贴板历史弹出窗口（默认热键 Ctrl+Alt+C，见 WindowActions.ShowClipboardHistory）。
     /// 紧凑版深色风格（与命令启动器一致）：顶部搜索框模糊过滤，↑↓/Ctrl+P/Ctrl+N 选择，
+    /// Home/Ctrl+A 跳到第一条、End/Ctrl+E 跳到最后一条、PageUp/PageDown 按一屏移动，
     /// 回车把选中条目粘贴回弹出前的前台窗口，Ctrl+Enter / 右键菜单切换置顶，
     /// Delete 删除条目（置顶条目须先取消置顶），Esc/失焦取消。
-    /// 列表默认按纯时间倒序（置顶条目也参与），裸 Tab 切换「最近优先 / 置顶优先」；
+    /// 列表默认按纯时间倒序（置顶条目也参与），裸 Tab 切换「最近优先 / 置顶优先」
+    /// （选中框保持原索引位置，不跟随原条目移动）；
     /// 搜索时结果始终置顶优先、不受 Tab 模式影响；置顶条目行尾显示图钉。
     /// 弹出位置优先取前台窗口的插入符位置，取不到时回退到鼠标所在屏幕居中。
     /// </summary>
@@ -41,6 +56,9 @@ namespace CommandLauncher
         private const double WindowWidth = 480;
         private const double WindowHeight = 560;
         private const double RowHeight = 28;
+
+        // 列表项行占位：Height 28 + Margin 上下各 1（见 InitializeComponent 的 itemStyle）
+        private const double RowExtent = RowHeight + 2;
 
         // 搜索框占位提示按当前排序模式切换（输入内容后照旧隐藏）
         private const string PlaceholderRecentFirst = "搜索（最近优先 · Tab 切换 · Enter 粘贴 · Del 删除）";
@@ -159,8 +177,8 @@ namespace CommandLauncher
             ClipboardHistoryManager.Instance.HistoryChanged += () =>
             {
                 if (IsVisible)
-                    // 必须包 lambda、不能直接传 RefreshList：它带可选参数（bool resetSelection = false），
-                    // 方法组会被编译器合成为 Action<bool>，Dispatcher 按 0 参数调用时抛
+                    // 必须包 lambda、不能直接传 RefreshList：它带可选参数（RefreshSelection selection = RefreshSelection.KeepEntry），
+                    // 方法组会被编译器合成为 Action<RefreshSelection>，Dispatcher 按 0 参数调用时抛
                     // TargetParameterCountException，删除/复制后的 UI 刷新会静默失败
                     // （旧写法曾让「按 Delete 删除」表现为毫无反应，回归测试见 ClipboardWindowTests）
                     Dispatcher.Invoke(() => RefreshList());
@@ -207,7 +225,7 @@ namespace CommandLauncher
             {
                 _placeholder.Visibility = string.IsNullOrEmpty(_searchBox.Text) ? Visibility.Visible : Visibility.Hidden;
                 // 列表刷新只对可见态有意义：输入只发生在可见时；HideWindow 清空搜索框（隐藏态）
-                // 只需更新占位提示，全量刷新留给下次唤出的 RefreshList(resetSelection: true)
+                // 只需更新占位提示，全量刷新留给下次唤出的 RefreshList(RefreshSelection.ResetToFirst)
                 if (IsVisible)
                     RefreshList();
             };
@@ -384,8 +402,8 @@ namespace CommandLauncher
             Logger.LogInfo($"剪贴板窗口唤出，弹出前前台窗口: {_previousForeground}");
 
             // 唤出时选中重置回第一条并滚到顶部（同命令启动器 ShowWindow 的惯例）；
-            // 放在 Show 之后做选择是启动器已验证的时序，可见态增量刷新仍走保留索引语义
-            RefreshList(resetSelection: true);
+            // 放在 Show 之后做选择是启动器已验证的时序，可见态增量刷新仍走 KeepEntry 语义
+            RefreshList(RefreshSelection.ResetToFirst);
 
             // 宽限期从刷新完成后起算：RefreshList 重建列表（上限 1000 时约数毫秒）以及紧随其后的
             // 布局阶段（缩略图正是在此时才按需解码）都在本方法返回后继续，若从 Show 起算，
@@ -575,14 +593,18 @@ namespace CommandLauncher
         }
 
         /// <summary>
-        /// 刷新列表。resetSelection=true 表示「隐藏→显示」的唤出路径：选中重置回第一条并滚到顶部
-        /// （与命令启动器 ShowWindow 的 ScrollCommandListToTop 惯例一致）；默认按条目对象保持选中，
-        /// 供可见态增量刷新使用——置顶/取消置顶会让条目在列表中移动，按对象找回才能让选中项跟随该条目，
-        /// 找不到时（如刚被 Delete）回退到原索引（Delete 删除后选中下一条等体验依赖该语义）。
+        /// 刷新列表。选中恢复方式由 <paramref name="selection"/> 决定：
+        /// KeepEntry（默认）按条目对象保持选中，供可见态增量刷新使用——置顶/取消置顶会让条目在
+        /// 列表中移动，按对象找回才能让选中项跟随该条目；找不到时（如刚被 Delete）回退到原索引
+        /// （Delete 删除后选中下一条等体验依赖该语义）。
+        /// KeepIndex 只保持原索引位置：Tab 切换排序后条目顺序变化，选中框应留在原位置而不是
+        /// 跟随原条目跳到新位置。
+        /// ResetToFirst 用于「隐藏→显示」的唤出路径：选中重置回第一条并滚到顶部
+        /// （与命令启动器 ShowWindow 的 ScrollCommandListToTop 惯例一致）。
         /// 缩略图不在此处解码：Image.Source 绑定条目 + ThumbnailConverter，由列表虚拟化在行实例化时按需加载
         /// （上限 1000 时全量预解码会让唤出同步冻结）。查询结果与 _entries 共享条目实例，故缩略图缓存跨刷新生效。
         /// </summary>
-        private void RefreshList(bool resetSelection = false)
+        private void RefreshList(RefreshSelection selection = RefreshSelection.KeepEntry)
         {
             int previousIndex = Math.Max(_list.SelectedIndex, 0);
             var previousEntry = _list.SelectedItem as ClipboardEntry;
@@ -592,31 +614,58 @@ namespace CommandLauncher
                 _items.Add(entry);
 
             _emptyHint.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Hidden;
-            if (_items.Count > 0)
-            {
-                int targetIndex;
-                if (resetSelection)
-                    targetIndex = 0;
-                else
-                {
-                    targetIndex = previousEntry != null ? _items.IndexOf(previousEntry) : -1;
-                    if (targetIndex < 0)
-                        targetIndex = Math.Min(previousIndex, _items.Count - 1);
-                }
-                _list.SelectedIndex = targetIndex;
-                _list.ScrollIntoView(_list.SelectedItem);
-            }
+
+            // 只有 KeepEntry 需要按对象查找；KeepIndex/ResetToFirst 不必白跑一次 IndexOf
+            int previousEntryIndex = selection == RefreshSelection.KeepEntry && previousEntry != null
+                ? _items.IndexOf(previousEntry)
+                : -1;
+            int targetIndex = ResolveRefreshTargetIndex(
+                previousIndex, previousEntryIndex, _items.Count, selection);
+            if (targetIndex < 0)
+                return; // 空列表：SelectedIndex 已随 Clear 归 -1
+
+            _list.SelectedIndex = targetIndex;
+            _list.ScrollIntoView(_list.SelectedItem);
         }
 
-        #region 键盘交互（↑↓/Ctrl+P/Ctrl+N 移动，回车粘贴，Ctrl+Enter 置顶，Esc 取消，Delete 删除，Tab 切换排序）
+        /// <summary>
+        /// 计算 RefreshList 重填后应选中的索引（纯函数，供单测）。
+        /// itemCount &lt;= 0 返回 -1；previousEntryIndex 为 -1 表示原条目已不在列表中。
+        /// </summary>
+        internal static int ResolveRefreshTargetIndex(
+            int previousIndex, int previousEntryIndex, int itemCount, RefreshSelection selection)
+        {
+            if (itemCount <= 0)
+                return -1;
+
+            return selection switch
+            {
+                RefreshSelection.ResetToFirst => 0,
+                RefreshSelection.KeepIndex => Math.Clamp(previousIndex, 0, itemCount - 1),
+                _ => previousEntryIndex >= 0
+                    ? Math.Clamp(previousEntryIndex, 0, itemCount - 1)
+                    : Math.Clamp(previousIndex, 0, itemCount - 1),
+            };
+        }
+
+        #region 键盘交互（↑↓/Ctrl+P/Ctrl+N、Home/End、Ctrl+A/Ctrl+E、PageUp/PageDown 移动，回车粘贴，Ctrl+Enter 置顶，Esc 取消，Delete 删除，Tab 切换排序）
 
         // 挂在窗口级而非搜索框（命令启动器仍挂搜索框级，此处是剪贴板窗口的有意差异）：
         // 鼠标点过列表项后键盘焦点落到 ListBoxItem，搜索框级处理器收不到按键，Delete/↑↓/Enter/Esc
         // 会全部失效；窗口级覆盖搜索框 / ListBoxItem / 列表 / 窗口自身的全部焦点位置。
-        // 对搜索框聚焦场景行为不变：隧道阶段窗口先于 TextBox 触发，Handled 后搜索框不再处理这些键。
+        // 对既有按键（↑↓/Ctrl+P、Ctrl+N、Enter、Esc、Delete、Tab）搜索框聚焦时行为不变：
+        // 隧道阶段窗口先于 TextBox 触发，Handled 后搜索框不再处理这些键。
+        // 首尾/翻页键（Home/End/Ctrl+A/Ctrl+E/PageUp/PageDown）是刻意例外，搜索框聚焦时**不吞键**：
+        // 列表照常移动，同时 TextBox 继续执行原生行首/行尾/全选/翻页行为（两者兼顾、零功能损失）；
+        // ListBox 与搜索框是兄弟节点、不在搜索框的事件路由上，不会因此二次导航。
+        // 焦点不在搜索框时（如 ListBoxItem）才吞键——WPF ListBox.OnKeyDown 自身会处理
+        // Home/End/PageUp/PageDown，不吞会重复移动。新键一律精确匹配修饰键，避免抢走
+        // Shift+Home/End（文本框选区）、Ctrl+Home/End（文档首尾）、Shift+PageUp/PageDown 等原生组合。
         private void OnPreviewKeyDown(object sender, KeyEventArgs e)
         {
-            bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+            var modifiers = Keyboard.Modifiers;
+            bool ctrl = (modifiers & ModifierKeys.Control) != 0;
+            bool searchFocused = _searchBox.IsKeyboardFocusWithin;
 
             if (e.Key == Key.Down || (ctrl && e.Key == Key.N))
             {
@@ -627,6 +676,28 @@ namespace CommandLauncher
             {
                 MoveSelection(-1);
                 e.Handled = true;
+            }
+            else if ((e.Key == Key.Home && modifiers == ModifierKeys.None) ||
+                     (e.Key == Key.A && modifiers == ModifierKeys.Control))
+            {
+                MoveSelectionTo(0);
+                e.Handled = !searchFocused;
+            }
+            else if ((e.Key == Key.End && modifiers == ModifierKeys.None) ||
+                     (e.Key == Key.E && modifiers == ModifierKeys.Control))
+            {
+                MoveSelectionTo(_items.Count - 1);
+                e.Handled = !searchFocused;
+            }
+            else if (e.Key == Key.PageUp && modifiers == ModifierKeys.None)
+            {
+                MoveSelectionByPage(-1);
+                e.Handled = !searchFocused;
+            }
+            else if (e.Key == Key.PageDown && modifiers == ModifierKeys.None)
+            {
+                MoveSelectionByPage(1);
+                e.Handled = !searchFocused;
             }
             else if (ctrl && e.Key == Key.Enter)
             {
@@ -649,7 +720,7 @@ namespace CommandLauncher
                 DeleteSelected();
                 e.Handled = true;
             }
-            else if (e.Key == Key.Tab && Keyboard.Modifiers == ModifierKeys.None)
+            else if (e.Key == Key.Tab && modifiers == ModifierKeys.None)
             {
                 // 只处理裸 Tab（在「最近优先 / 置顶优先」间切换）；
                 // Shift+Tab 放行给 WPF 默认焦点导航，Ctrl/Alt/Win+Tab 不处理。
@@ -664,31 +735,58 @@ namespace CommandLauncher
         /// <summary>
         /// 切换排序模式（裸 Tab）：翻转后更新占位提示；搜索框有内容时不刷新列表
         /// （搜索结果始终置顶优先、与模式无关），清空搜索时 TextChanged 触发的刷新会应用新模式。
+        /// 刷新用 KeepIndex：排序变化会让原条目移动，选中框应留在原索引位置而不是跟着条目跳走。
         /// </summary>
         private void ToggleSortMode()
         {
             _pinnedFirst = !_pinnedFirst;
             UpdatePlaceholder();
             if (string.IsNullOrWhiteSpace(_searchBox.Text))
-                RefreshList();
+                RefreshList(RefreshSelection.KeepIndex);
         }
 
-        private void MoveSelection(int direction)
+        private void MoveSelection(int direction) => MoveSelectionTo(_list.SelectedIndex + direction);
+
+        /// <summary>按一屏移动（PageUp/PageDown）：步长 = 列表视口高 ÷ 行占位（至少 1 行）。</summary>
+        private void MoveSelectionByPage(int direction)
+        {
+            int pageStep = Math.Max(1, (int)(_list.ActualHeight / RowExtent));
+            int baseIndex = Math.Max(_list.SelectedIndex, 0);
+            MoveSelectionTo(baseIndex + direction * pageStep);
+        }
+
+        /// <summary>
+        /// 把选中项移动到指定索引（越界钳制）；↑↓/Home/End/PageUp/PageDown 统一走这里。
+        /// 鼠标点过列表项后键盘焦点在 ListBoxItem 上：让焦点跟随选择，避免 ListBox 内建对
+        /// Space 的处理把选择跳回旧焦点项、并在视觉上残留焦点虚框；
+        /// 搜索框持有焦点时（IsKeyboardFocusWithin=false）不动焦点，连续输入过滤不受影响。
+        /// </summary>
+        private void MoveSelectionTo(int index)
         {
             int n = _items.Count;
             if (n == 0)
                 return;
 
-            int idx = Math.Clamp(_list.SelectedIndex + direction, 0, n - 1);
+            int idx = Math.Clamp(index, 0, n - 1);
             _list.SelectedIndex = idx;
             _list.ScrollIntoView(_list.SelectedItem);
 
-            // 鼠标点过列表项后键盘焦点在 ListBoxItem 上：让焦点跟随选择，避免 ListBox 内建对
-            // Space 的处理把选择跳回旧焦点项、并在视觉上残留焦点虚框；
-            // 搜索框持有焦点时（IsKeyboardFocusWithin=false）不动焦点，连续输入过滤不受影响。
-            if (_list.IsKeyboardFocusWithin &&
-                _list.ItemContainerGenerator.ContainerFromIndex(idx) is ListBoxItem item)
+            if (!_list.IsKeyboardFocusWithin)
+                return;
+
+            // 远距离跳转的目标行可能尚未由虚拟化生成；补一次同步布局再取。
+            var item = _list.ItemContainerGenerator.ContainerFromIndex(idx) as ListBoxItem;
+            if (item == null)
+            {
+                _list.UpdateLayout();
+                item = _list.ItemContainerGenerator.ContainerFromIndex(idx) as ListBoxItem;
+            }
+
+            // 兜底：至少把焦点从旧行移走，避免 Space 被 ListBox 内建处理跳回旧项
+            if (item != null)
                 item.Focus();
+            else
+                _list.Focus();
         }
 
         #endregion
