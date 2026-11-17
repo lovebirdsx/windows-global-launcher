@@ -28,7 +28,7 @@ namespace CommandLauncher
 
     /// <summary>
     /// 剪贴板历史弹出窗口（默认热键 Ctrl+Alt+C，见 WindowActions.ShowClipboardHistory）。
-    /// 紧凑版深色风格（与命令启动器一致）：顶部搜索框模糊过滤，↑↓/Ctrl+P/Ctrl+N 选择，
+    /// 紧凑版深色风格（与命令启动器一致）：顶部搜索框模糊过滤，↑↓/Ctrl+K/Ctrl+J 选择（K 上、J 下），
     /// Home/Ctrl+A 跳到第一条、End/Ctrl+E 跳到最后一条、PageUp/PageDown 按一屏移动，
     /// 回车把选中条目粘贴回弹出前的前台窗口，Ctrl+Enter / 右键菜单切换置顶，
     /// Delete 删除条目（置顶条目须先取消置顶），Esc/失焦取消。
@@ -648,12 +648,12 @@ namespace CommandLauncher
             };
         }
 
-        #region 键盘交互（↑↓/Ctrl+P/Ctrl+N、Home/End、Ctrl+A/Ctrl+E、PageUp/PageDown 移动，回车粘贴，Ctrl+Enter 置顶，Esc 取消，Delete 删除，Tab 切换排序）
+        #region 键盘交互（↑↓/Ctrl+K/Ctrl+J、Home/End、Ctrl+A/Ctrl+E、PageUp/PageDown 移动，回车粘贴，Ctrl+Enter 置顶，Esc 取消，Delete 删除，Tab 切换排序）
 
         // 挂在窗口级而非搜索框（命令启动器仍挂搜索框级，此处是剪贴板窗口的有意差异）：
         // 鼠标点过列表项后键盘焦点落到 ListBoxItem，搜索框级处理器收不到按键，Delete/↑↓/Enter/Esc
         // 会全部失效；窗口级覆盖搜索框 / ListBoxItem / 列表 / 窗口自身的全部焦点位置。
-        // 对既有按键（↑↓/Ctrl+P、Ctrl+N、Enter、Esc、Delete、Tab）搜索框聚焦时行为不变：
+        // 对既有按键（↑↓/Ctrl+K、Ctrl+J、Enter、Esc、Delete、Tab）搜索框聚焦时行为不变：
         // 隧道阶段窗口先于 TextBox 触发，Handled 后搜索框不再处理这些键。
         // 首尾/翻页键（Home/End/Ctrl+A/Ctrl+E/PageUp/PageDown）是刻意例外，搜索框聚焦时**不吞键**：
         // 列表照常移动，同时 TextBox 继续执行原生行首/行尾/全选/翻页行为（两者兼顾、零功能损失）；
@@ -667,12 +667,12 @@ namespace CommandLauncher
             bool ctrl = (modifiers & ModifierKeys.Control) != 0;
             bool searchFocused = _searchBox.IsKeyboardFocusWithin;
 
-            if (e.Key == Key.Down || (ctrl && e.Key == Key.N))
+            if (e.Key == Key.Down || (ctrl && e.Key == Key.J))
             {
                 MoveSelection(1);
                 e.Handled = true;
             }
-            else if (e.Key == Key.Up || (ctrl && e.Key == Key.P))
+            else if (e.Key == Key.Up || (ctrl && e.Key == Key.K))
             {
                 MoveSelection(-1);
                 e.Handled = true;
@@ -756,7 +756,7 @@ namespace CommandLauncher
         }
 
         /// <summary>
-        /// 把选中项移动到指定索引（越界钳制）；↑↓/Home/End/PageUp/PageDown 统一走这里。
+        /// 把选中项移动到指定索引（越界钳制）；↑↓/Ctrl+K/Ctrl+J/Home/End/PageUp/PageDown 统一走这里。
         /// 鼠标点过列表项后键盘焦点在 ListBoxItem 上：让焦点跟随选择，避免 ListBox 内建对
         /// Space 的处理把选择跳回旧焦点项、并在视觉上残留焦点虚框；
         /// 搜索框持有焦点时（IsKeyboardFocusWithin=false）不动焦点，连续输入过滤不受影响。

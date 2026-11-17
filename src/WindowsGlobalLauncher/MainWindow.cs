@@ -274,7 +274,7 @@ namespace CommandLauncher
         {
             return new TextBlock
             {
-                Text = "输入字符搜索（ctrl+p, ctrl+n上下选择，回车执行）",
+                Text = "输入字符搜索（ctrl+k, ctrl+j上下选择，回车执行）",
                 FontSize = 16,
                 Padding = new Thickness(15, 8, 15, 8),
                 Foreground = new SolidColorBrush(Color.FromArgb(255, 150, 150, 150)),
@@ -1006,15 +1006,15 @@ namespace CommandLauncher
                     break;
             }
 
-            // Ctrl+P / Ctrl+N
+            // Ctrl+K / Ctrl+J（K 上、J 下）
             if (e.KeyboardDevice.Modifiers == ModifierKeys.Control)
             {
-                if (e.Key == Key.P)
+                if (e.Key == Key.K)
                 {
                     MoveSelection(-1);
                     e.Handled = true;
                 }
-                else if (e.Key == Key.N)
+                else if (e.Key == Key.J)
                 {
                     MoveSelection(1);
                     e.Handled = true;
